@@ -335,13 +335,17 @@ nameCommands = M.fromList
 
 refCommands :: PandocMonad m => M.Map Text (LP m Inlines)
 refCommands = M.fromList
-  [ ("label", rawInlineOr "label" dolabel)
-  , ("ref", rawInlineOr "ref" $ doref "ref")
-  , ("cref", rawInlineOr "cref" $ doref "ref")       -- from cleveref.sty
-  , ("vref", rawInlineOr "vref" $ doref "ref+page")  -- from varioref.sty
-  , ("eqref", rawInlineOr "eqref" $ doref "eqref")   -- from amsmath.sty
-  , ("autoref", rawInlineOr "autoref" $ doref "autoref") -- from hyperref.sty
-  ]
+  [ ("label", rawInlineOr' "label" dolabel)
+  , ("ref", rawInlineOr' "ref" $ doref "ref")
+  , ("cref", rawInlineOr' "cref" $ doref "ref")       -- from cleveref.sty
+  , ("vref", rawInlineOr' "vref" $ doref "ref+page")  -- from varioref.sty
+  , ("eqref", rawInlineOr' "eqref" $ doref "eqref")   -- from amsmath.sty
+  , ("autoref", rawInlineOr' "autoref" $ doref "autoref") -- from hyperref.sty
+  ] where
+    rawInlineOr' :: PandocMonad m => Text -> LP m Inlines -> LP m Inlines
+    rawInlineOr' name' fallback = do
+      rawInline "latex" <$> getRawCommand name' ("\\" <> name')
+
 
 acronymCommands :: PandocMonad m => M.Map Text (LP m Inlines)
 acronymCommands = M.fromList
