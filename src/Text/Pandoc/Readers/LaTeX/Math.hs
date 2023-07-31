@@ -59,13 +59,19 @@ mathDisplay = displayMath . trimMath
 mathInline :: Text -> Inlines
 mathInline = math . trimMath
 
-mathEnvWith :: PandocMonad m
+{-mathEnvWith :: PandocMonad m
             => (Inlines -> a) -> Maybe Text -> Text -> LP m a
 mathEnvWith f innerEnv name = f . mathDisplay . inner <$> mathEnv name
    where inner x = case innerEnv of
                         Nothing -> x
                         Just y  -> "\\begin{" <> y <> "}\n" <> x <>
-                                   "\n\\end{" <> y <> "}"
+                                   "\n\\end{" <> y <> "}"-}
+mathEnvWith :: PandocMonad m
+            => (Inlines -> a) -> Maybe Text -> Text -> LP m a
+mathEnvWith f _ name = f . rawMath . inner <$> mathEnv name
+   where inner x =  "\\begin{" <> name <> "}" <> x <>
+                                   "\\end{" <> name <> "}"
+         rawMath = B.rawInline "latex"
 
 mathEnv :: PandocMonad m => Text -> LP m Text
 mathEnv name = do
