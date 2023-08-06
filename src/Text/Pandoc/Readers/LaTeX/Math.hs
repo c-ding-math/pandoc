@@ -71,7 +71,7 @@ mathEnvWith :: PandocMonad m
 mathEnvWith f _ name = f . rawMath . inner <$> mathEnv name
    where inner x =  "\\begin{" <> name <> "}" <> x <>
                                    "\\end{" <> name <> "}"
-         rawMath = B.rawInline "latex"
+         rawMath = (B.rawInline "latex") . trimMath
 
 mathEnv :: PandocMonad m => Text -> LP m Text
 mathEnv name = do
