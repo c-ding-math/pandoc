@@ -841,6 +841,23 @@ section (ident, classes, kvs) lvl = do
   attr' <- registerHeader (lab, classes, kvs) contents
   return $ headerWith attr' lvl contents
 
+rawSectionOr :: PandocMonad m => Text -> LP m Blocks -> LP m Blocks
+rawSectionOr name fallback = do
+  skipopts
+  contents <- grouped inline
+  labelText <- option "" $
+          try (spaces >> controlSeq "label"
+               >> spaces >> untokenize <$> braced)
+  -- if raw_tex allowed, don't process
+  parseRaw <- extensionEnabled Ext_raw_tex <$> getOption readerExtensions
+  if parseRaw
+     then do 
+      rawCommand <- getRawCommand name ("\\" <> name)
+      if labelText=="" 
+        then return $ rawBlock "latex" $ rawCommand <> "{" <> stringify contents <> "}"
+        else return $ rawBlock "latex" $ rawCommand <> "{" <> stringify contents <> "}\\label{" <> labelText <> "}"
+     else fallback
+
 blockCommand :: PandocMonad m => LP m Blocks
 blockCommand = try $ do
   Tok _ (CtrlSeq name) txt <- anyControlSeq
@@ -924,23 +941,23 @@ blockCommands = M.fromList
    , ("lowertitleback", mempty <$ (skipopts *> tok >>= addMeta "lowertitleback"))
    , ("dedication", mempty <$ (skipopts *> tok >>= addMeta "dedication"))
    -- sectioning
-   , ("part", section nullAttr (-1))
-   , ("part*", section ("",["unnumbered"],[]) (-1))
-   , ("chapter", section nullAttr 0)
-   , ("chapter*", section ("",["unnumbered"],[]) 0)
-   , ("section", section nullAttr 1)
-   , ("section*", section ("",["unnumbered"],[]) 1)
-   , ("subsection", section nullAttr 2)
-   , ("subsection*", section ("",["unnumbered"],[]) 2)
-   , ("subsubsection", section nullAttr 3)
-   , ("subsubsection*", section ("",["unnumbered"],[]) 3)
-   , ("paragraph", section nullAttr 4)
-   , ("paragraph*", section ("",["unnumbered"],[]) 4)
-   , ("subparagraph", section nullAttr 5)
-   , ("subparagraph*", section ("",["unnumbered"],[]) 5)
+   , ("part", rawSectionOr "part" $ section nullAttr (-1))
+   , ("part*", rawSectionOr "part*" $ section ("",["unnumbered"],[]) (-1))
+   , ("chapter", rawSectionOr "chapter" $ section nullAttr 0)
+   , ("chapter*", rawSectionOr "chapter*" $ section ("",["unnumbered"],[]) 0)
+   , ("section", rawSectionOr "section" $ section nullAttr 1)
+   , ("section*", rawSectionOr "section*" $ section ("",["unnumbered"],[]) 1)
+   , ("subsection", rawSectionOr "subsection" $ section nullAttr 2)
+   , ("subsection*", rawSectionOr "subsection*" $ section ("",["unnumbered"],[]) 2)
+   , ("subsubsection", rawSectionOr "subsubsection" $ section nullAttr 3)
+   , ("subsubsection*", rawSectionOr "subsubsection*" $ section ("",["unnumbered"],[]) 3)
+   , ("paragraph", rawSectionOr "paragraph" $ section nullAttr 4)
+   , ("paragraph*", rawSectionOr "paragraph*" $ section ("",["unnumbered"],[]) 4)
+   , ("subparagraph", rawSectionOr "subparagraph" $ section nullAttr 5)
+   , ("subparagraph*", rawSectionOr "subparagraph*" $ section ("",["unnumbered"],[]) 5)
    -- beamer slides
-   , ("frametitle", section nullAttr 3)
-   , ("framesubtitle", section nullAttr 4)
+   , ("frametitle", rawSectionOr "frametitle" $ section nullAttr 3)
+   , ("framesubtitle", rawSectionOr "framesubtitle" $ section nullAttr 4)
    -- letters
    , ("opening", para . trimInlines <$> (skipopts *> tok))
    , ("closing", skipopts *> closing)
