@@ -18,11 +18,10 @@ jobs:
             cabal_opts: '-fembed_data_files -fserver -flua'
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
     - name: Install ghc
       run: |
-        # We use ghc 9.2 because of #8955
-        ghcup install ghc --set 9.2
+        ghcup install ghc --set 9.6
         ghcup install cabal --set 3.10
 
     - name: Install dependencies
@@ -58,7 +57,7 @@ jobs:
           cd windows
           echo Creating msi...
           dir
-          @set WIXBIN="c:\Program Files (x86)\WiX Toolset v3.11\bin"
+          @set WIXBIN="c:\Program Files (x86)\WiX Toolset v3.14\bin"
           @set WORKDIR=%CD%
           echo Running candle...
           %WIXBIN%\candle -arch ${{ matrix.versions.arch }} -dVERSION=%VERSION% -dBINPATH=%RELEASE% *.wxs -out wixobj\
@@ -71,28 +70,33 @@ jobs:
           copy windows\pandoc-%VERSION%-${{ matrix.versions.osarch }}-UNSIGNED.msi windows-release-candidate
           copy windows\pandoc-%VERSION%-${{ matrix.versions.osarch }}.zip windows-release-candidate
           copy windows\Makefile windows-release-candidate
-    - uses: actions/upload-artifact@v3
+    - uses: actions/upload-artifact@v4
       with:
         name: windows-release-candidate
         path: windows-release-candidate
 
   macos:
 
-    runs-on: macos-11
+    runs-on: macos-13
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
+
+    - name: Install ghcup
+      run: |
+        brew install ghcup
 
     - name: Install ghc and cabal
       run: |
-        ghcup install ghc --set 9.4
+        ghcup install ghc --set 9.6
         ghcup install cabal --set 3.10
+        echo "$HOME/.ghcup/bin" >> "${GITHUB_PATH}"
 
     - name: Create release
       run: |
         sh macos/make_macos_release.sh
 
-    - uses: actions/upload-artifact@v3
+    - uses: actions/upload-artifact@v4
       with:
         name: macos-x86_64
         path: macos-x86_64
@@ -101,16 +105,14 @@ jobs:
 
 #   runs-on: ubuntu-latest
 #   steps:
-#   - uses: actions/checkout@v3
+#   - uses: actions/checkout@v4
 #   - name: Create linux package
 #     run: |
 #         make debpkg
 #         mkdir linux-release-candidate
 #         cp linux/artifacts/*.deb linux-release-candidate/
 #         cp linux/artifacts/*.tar.gz linux-release-candidate/
-#   - uses: actions/upload-artifact@v3
+#   - uses: actions/upload-artifact@v4
 #     with:
 #       name: linux-release-candidate
 #       path: linux-release-candidate
-
-

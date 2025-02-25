@@ -2,7 +2,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {- |
    Module      : Text.Pandoc.Writers.LaTeX.Table
-   Copyright   : Copyright (C) 2006-2023 John MacFarlane
+   Copyright   : Copyright (C) 2006-2024 John MacFarlane
    License     : GNU GPL, version 2 or above
 
    Maintainer  : John MacFarlane <jgm@berkeley.edu>
@@ -33,11 +33,12 @@ import Text.Pandoc.Writers.LaTeX.Caption (getCaption)
 import Text.Pandoc.Writers.LaTeX.Notes (notesToLaTeX)
 import Text.Pandoc.Writers.LaTeX.Types
   ( LW, WriterState (stBeamer, stExternalNotes, stInMinipage, stMultiRow
-                    , stNotes, stTable) )
+                    , stNotes, stTable, stOptions) )
 import Text.Pandoc.Writers.LaTeX.Util (labelFor)
 import Text.Printf (printf)
 import qualified Text.Pandoc.Builder as B
 import qualified Text.Pandoc.Writers.AnnotatedTable as Ann
+import Text.Pandoc.Options (CaptionPosition(..), WriterOptions(..))
 
 tableToLaTeX :: PandocMonad m
              => ([Inline] -> LW m (Doc Text))
@@ -45,13 +46,20 @@ tableToLaTeX :: PandocMonad m
              -> Ann.Table
              -> LW m (Doc Text)
 tableToLaTeX inlnsToLaTeX blksToLaTeX tbl = do
+  opts <- gets stOptions
   let (Ann.Table (ident, _, _) caption specs thead tbodies tfoot) = tbl
   CaptionDocs capt captNotes <- captionToLaTeX inlnsToLaTeX caption ident
-  let isSimpleTable = all (all isSimpleCell) $ mconcat
-                      [ headRows thead
-                      , concatMap bodyRows tbodies
-                      , footRows tfoot
-                      ]
+  let hasTopCaption = not (isEmpty capt) &&
+                        writerTableCaptionPosition opts == CaptionAbove
+  let hasBottomCaption = not (isEmpty capt) &&
+                          writerTableCaptionPosition opts == CaptionBelow
+  let isSimpleTable =
+        all ((== ColWidthDefault) . snd) specs &&
+        all (all isSimpleCell)
+          (mconcat [ headRows thead
+                   , concatMap bodyRows tbodies
+                   , footRows tfoot
+                   ])
   let removeNote (Note _) = Span ("", [], []) []
       removeNote x        = x
   let colCount = ColumnCount $ length specs
@@ -62,24 +70,31 @@ tableToLaTeX inlnsToLaTeX blksToLaTeX tbl = do
   -- duplicate the header rows for this.
   head' <- do
     let mkHead = headToLaTeX blksToLaTeX isSimpleTable colCount
-    case (not $ isEmpty capt, not $ isEmptyHead thead) of
-      (False, False) -> return "\\toprule\\noalign{}"
-      (False, True)  -> mkHead thead
-      (True, False)  -> return (capt $$ "\\toprule\\noalign{}" $$ "\\endfirsthead")
-      (True, True)   -> do
+    case (hasTopCaption, isEmptyHead thead) of
+      (False, True) -> return "\\toprule\\noalign{}"
+      (False, False)  -> mkHead thead
+      (True, True)  -> return (capt <> "\\tabularnewline"
+                                $$ "\\toprule\\noalign{}"
+                                $$ "\\endfirsthead")
+      (True, False)   -> do
         -- avoid duplicate notes in head and firsthead:
         firsthead <- mkHead thead
         repeated  <- mkHead (walk removeNote thead)
-        return $ capt $$ firsthead $$ "\\endfirsthead" $$ repeated
+        return $ capt <> "\\tabularnewline"
+                 $$ firsthead
+                 $$ "\\endfirsthead"
+                 $$ repeated
   rows' <- mapM (rowToLaTeX blksToLaTeX isSimpleTable colCount BodyCell) $
                 mconcat (map bodyRows tbodies)
-  foot' <- if isEmptyFoot tfoot
-           then pure empty
-           else do
-             lastfoot <- mapM
-                (rowToLaTeX blksToLaTeX isSimpleTable colCount BodyCell) $
-                footRows tfoot
-             pure $ "\\midrule\\noalign{}" $$ vcat lastfoot
+  lastfoot <- mapM (rowToLaTeX blksToLaTeX isSimpleTable colCount BodyCell) $
+                    footRows tfoot
+  let foot' = (if isEmptyFoot tfoot
+                  then mempty
+                  else "\\midrule\\noalign{}" $$ vcat lastfoot)
+              $$ "\\bottomrule\\noalign{}"
+              $$ (if hasBottomCaption
+                     then "\\tabularnewline" $$ capt
+                     else mempty)
   modify $ \s -> s{ stTable = True }
   notes <- notesToLaTeX <$> gets stNotes
   beamer <- gets stBeamer
@@ -97,10 +112,8 @@ tableToLaTeX inlnsToLaTeX blksToLaTeX tbl = do
        (if beamer
              then [ vcat rows'
                   , foot'
-                  , "\\bottomrule\\noalign{}"
                   ]
              else [ foot'
-                  , "\\bottomrule\\noalign{}"
                   , "\\endlastfoot"
                   ,  vcat rows'
                   ])
@@ -111,12 +124,14 @@ tableToLaTeX inlnsToLaTeX blksToLaTeX tbl = do
 isSimpleCell :: Ann.Cell -> Bool
 isSimpleCell (Ann.Cell _ _ (Cell _attr _align _rowspan _colspan blocks)) =
   case blocks of
-    [Para _]  -> True
-    [Plain _] -> True
+    [Para _]  -> not (hasLineBreak blocks)
+    [Plain _] -> not (hasLineBreak blocks)
     []        -> True
     _         -> False
-
-
+  where
+    hasLineBreak = getAny . query isLineBreak
+    isLineBreak LineBreak = Any True
+    isLineBreak _         = Any False
 
 -- | Total number of columns in a table.
 newtype ColumnCount = ColumnCount Int
@@ -133,17 +148,19 @@ colDescriptors isSimpleTable
                        then replicate (length specs)
                             (1 / fromIntegral (length specs))
                        else map toRelWidth widths
-  in if defaultWidthsOnly && isSimpleTable
-     then hcat $ map (literal . colAlign) aligns
-     else (cr <>) . nest 2 . vcat . map literal $
-          zipWith (toColDescriptor (length specs))
-                  aligns
-                  relativeWidths
+  in if null aligns
+        then "l"  -- #9350, table needs at least one column spec
+        else if defaultWidthsOnly && isSimpleTable
+                then hcat $ map (literal . colAlign) aligns
+                else (cr <>) . nest 2 . vcat . map literal $
+                     zipWith (toColDescriptor (length specs))
+                             aligns
+                             relativeWidths
   where
     toColDescriptor :: Int -> Alignment -> Double -> Text
     toColDescriptor numcols align width =
       T.pack $ printf
-      ">{%s\\arraybackslash}p{(\\columnwidth - %d\\tabcolsep) * \\real{%0.4f}}"
+      ">{%s\\arraybackslash}p{(\\linewidth - %d\\tabcolsep) * \\real{%0.4f}}"
       (T.unpack (alignCommand align))
       ((numcols - 1) * 2)
       width
@@ -186,7 +203,6 @@ captionToLaTeX inlnsToLaTeX caption ident = do
                        else "\\caption" <> captForLot <>
                             braces captionText
                             <> label
-                            <> "\\tabularnewline"
     }
 
 type BlocksWriter m = [Block] -> LW m (Doc Text)
@@ -354,7 +370,8 @@ cellToLaTeX blockListToLaTeX isSimpleTable colCount celltype annotatedCell = do
                        (RowSpan 1) -> x
                        (RowSpan n) -> let nrows = literal (tshow n)
                                       in "\\multirow" <> braces nrows
-                                         <> braces "*" <> braces x
+                                         <> braces "=" -- width of column
+                                         <> braces x
   return . inMultiColumn . inMultiRow $ result
 
 -- | Returns the width of a cell spanning @n@ columns.
@@ -384,7 +401,7 @@ multicolumnDescriptor isSimpleTable
               (T.unpack (colAlign align))
               (if colnum + colspan >= numcols then skipColSep else "")
 
-        else printf "%s>{%s\\arraybackslash}p{(\\columnwidth - %d\\tabcolsep) * \\real{%0.4f} + %d\\tabcolsep}%s"
+        else printf "%s>{%s\\arraybackslash}p{(\\linewidth - %d\\tabcolsep) * \\real{%0.4f} + %d\\tabcolsep}%s"
               (if colnum == 0 then skipColSep else "")
               (T.unpack (alignCommand align))
               (2 * (numcols - 1))

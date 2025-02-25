@@ -1,10 +1,10 @@
 {-# LANGUAGE OverloadedStrings #-}
 {- |
    Module      : Tests.Readers.Org.Inline
-   Copyright   : © 2014-2023 Albert Krewinkel
+   Copyright   : © 2014-2024 Albert Krewinkel
    License     : GNU GPL, version 2 or above
 
-   Maintainer  : Albert Krewinkel <albert@zeitkraut.de>
+   Maintainer  : Albert Krewinkel <albert+pandoc@tarleb.com>
    Stability   : alpha
    Portability : portable
 
@@ -393,6 +393,11 @@ tests =
                 , "{{{HELLO()}}}"
                 ] =?>
       para "Foo Bar"
+  , "Macro called with an escaped comma" =:
+      T.unlines [ "#+MACRO: HELLO Foo $1"
+                , "{{{HELLO(moin\\, niom)}}}"
+                ] =?>
+      para "Foo moin, niom"
 
   , testGroup "Citations" Citation.tests
   , testGroup "Footnotes" Note.tests

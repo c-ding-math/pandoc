@@ -4,7 +4,7 @@
 {-# LANGUAGE OverloadedStrings          #-}
 {- |
    Module      : Text.Pandoc.Extensions
-   Copyright   : Copyright (C) 2012-2023 John MacFarlane
+   Copyright   : Copyright (C) 2012-2024 John MacFarlane
    License     : GNU GPL, version 2 or above
 
    Maintainer  : John MacFarlane <jgm@berkeley.edu>
@@ -45,6 +45,7 @@ import qualified Data.Set as Set
 -- | Individually selectable syntax extensions.
 data Extension =
       Ext_abbreviations       -- ^ PHP markdown extra abbreviation definitions
+    | Ext_alerts              -- ^ Special block quotes become alerts
     | Ext_all_symbols_escapable  -- ^ Make all non-alphanumerics escapable
     | Ext_amuse -- ^ Enable Text::Amuse extensions to Emacs Muse markup
     | Ext_angle_brackets_escapable  -- ^ Make < and > escapable
@@ -133,6 +134,7 @@ data Extension =
     | Ext_task_lists          -- ^ Parse certain list items as task list items
     | Ext_table_captions      -- ^ Pandoc-style table captions
     | Ext_tex_math_dollars    -- ^ TeX math between $..$ or $$..$$
+    | Ext_tex_math_gfm        -- ^ Additional TeX math style used in GFM
     | Ext_tex_math_double_backslash  -- ^ TeX math btw \\(..\\) \\[..\\]
     | Ext_tex_math_single_backslash  -- ^ TeX math btw \(..\) \[..\]
     | Ext_wikilinks_title_after_pipe -- ^ Support wikilinks of style
@@ -307,6 +309,8 @@ githubMarkdownExtensions = extensionsFromList
   , Ext_emoji
   , Ext_fenced_code_blocks
   , Ext_backtick_code_blocks
+  , Ext_footnotes
+  , Ext_alerts
   ]
 
 -- | Extensions to be used with multimarkdown.
@@ -398,6 +402,8 @@ getDefaultExtensions "gfm"             = extensionsFromList
   , Ext_yaml_metadata_block
   , Ext_footnotes
   , Ext_tex_math_dollars
+  , Ext_tex_math_gfm
+  , Ext_alerts
   ]
 getDefaultExtensions "commonmark"      = extensionsFromList
                                           [Ext_raw_html]
@@ -408,8 +414,6 @@ getDefaultExtensions "commonmark_x"    = extensionsFromList
   , Ext_strikeout
   , Ext_task_lists
   , Ext_emoji
-  , Ext_pipe_tables
-  , Ext_raw_html
   , Ext_smart
   , Ext_tex_math_dollars
   , Ext_superscript
@@ -422,6 +426,7 @@ getDefaultExtensions "commonmark_x"    = extensionsFromList
   , Ext_raw_attribute
   , Ext_implicit_header_references
   , Ext_attributes
+  , Ext_alerts
   , Ext_yaml_metadata_block
   ]
 getDefaultExtensions "org"             = extensionsFromList
@@ -466,7 +471,9 @@ getDefaultExtensions "jats_articleauthoring" = getDefaultExtensions "jats"
 getDefaultExtensions "opml"            = pandocExtensions -- affects notes
 getDefaultExtensions "markua"          = extensionsFromList
                                           []
-getDefaultExtensions "typst"           = extensionsFromList [Ext_citations]
+getDefaultExtensions "typst"           = extensionsFromList [Ext_citations,
+                                                             Ext_smart]
+getDefaultExtensions "dokuwiki"        = extensionsFromList [Ext_smart]
 getDefaultExtensions _                 = extensionsFromList
                                           [Ext_auto_identifiers]
 
@@ -549,10 +556,12 @@ getAllExtensions f = universalExtensions <> getAll f
     , Ext_task_lists
     , Ext_emoji
     , Ext_raw_html
+    , Ext_alerts
     , Ext_implicit_figures
     , Ext_hard_line_breaks
     , Ext_smart
     , Ext_tex_math_dollars
+    , Ext_tex_math_gfm
     , Ext_superscript
     , Ext_subscript
     , Ext_definition_lists
@@ -605,6 +614,7 @@ getAllExtensions f = universalExtensions <> getAll f
     , Ext_raw_tex
     , Ext_task_lists
     , Ext_literate_haskell
+    , Ext_empty_paragraphs
     ]
   getAll "beamer"          = getAll "latex"
   getAll "context"         = autoIdExtensions <>
@@ -635,7 +645,9 @@ getAllExtensions f = universalExtensions <> getAll f
   getAll "vimwiki"         = autoIdExtensions
   getAll "dokuwiki"        = autoIdExtensions <>
     extensionsFromList
-    [ Ext_tex_math_dollars ]
+    [ Ext_tex_math_dollars
+    , Ext_raw_html
+    , Ext_smart ]
   getAll "tikiwiki"        = autoIdExtensions
   getAll "rst"             = autoIdExtensions <>
     extensionsFromList
@@ -645,5 +657,6 @@ getAllExtensions f = universalExtensions <> getAll f
   getAll "mediawiki"       = autoIdExtensions <>
     extensionsFromList
     [ Ext_smart ]
-  getAll "typst"           = extensionsFromList [Ext_citations]
+  getAll "typst"           = extensionsFromList [Ext_citations, Ext_smart]
+  getAll "djot"            = extensionsFromList [Ext_sourcepos]
   getAll _                 = mempty

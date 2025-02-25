@@ -3,11 +3,11 @@
 {- |
    Module      : Text.Pandoc.Writers.Org
    Copyright   : © 2010-2015 Puneeth Chaganti <punchagan@gmail.com>
-                   2010-2023 John MacFarlane <jgm@berkeley.edu>
-                   2016-2023 Albert Krewinkel <tarleb+pandoc@moltkeplatz.de>
+                   2010-2024 John MacFarlane <jgm@berkeley.edu>
+                   2016-2024 Albert Krewinkel <albert+pandoc@tarleb.com>
    License     : GNU GPL, version 2 or above
 
-   Maintainer  : Albert Krewinkel <tarleb+pandoc@moltkeplatz.de>
+   Maintainer  : Albert Krewinkel <albert+pandoc@tarleb.com>
    Stability   : alpha
    Portability : portable
 
@@ -90,16 +90,19 @@ noteToOrg num note = do
   return $ hang (length marker) (text marker) contents
 
 -- | Escape special characters for Org.
-escapeString :: Text -> Text
+escapeString :: Text -> Doc Text
 escapeString t
-  | T.all (\c -> c < '\x2013' || c > '\x2026') t = t
-  | otherwise = T.concatMap escChar t
+  | T.all isAlphaNum t = literal t
+  | otherwise = mconcat $ map escChar (T.unpack t)
   where
    escChar '\x2013' = "--"
    escChar '\x2014' = "---"
    escChar '\x2019' = "'"
    escChar '\x2026' = "..."
-   escChar c        = T.singleton c
+   escChar c
+     -- escape special chars with ZERO WIDTH SPACE as org manual suggests
+     | c == '*' || c == '#' || c == '|' = afterBreak "\x200B" <> char c
+     | otherwise = char c
 
 isRawFormat :: Format -> Bool
 isRawFormat f =
@@ -191,11 +194,19 @@ blockToOrg (CodeBlock (ident,classes,kvs) str) = do
   let (beg, end) = case lang of
         Nothing -> ("#+begin_example" <> numberlines, "#+end_example")
         Just x  -> ("#+begin_src " <> x <> numberlines <> args, "#+end_src")
-  return $ name $$ literal beg $$ literal str $$ literal end $$ blankline
+  -- escape special lines
+  let escape_line line =
+        let (spaces, code) = T.span (\c -> c == ' ' || c == '\t') line
+        in spaces <>
+           (if T.isPrefixOf "#+" code || T.isPrefixOf "*" code
+            then T.cons ',' code
+            else code)
+  let escaped = T.unlines . map escape_line . T.lines $ str
+  return $ name $$ literal beg $$ literal escaped $$ literal end $$ blankline
 blockToOrg (BlockQuote blocks) = do
   contents <- blockListToOrg blocks
   return $ blankline $$ "#+begin_quote" $$
-           contents $$ "#+end_quote" $$ blankline
+           chomp contents $$ "#+end_quote" $$ blankline
 blockToOrg (Table _ blkCapt specs thead tbody tfoot) =  do
   let (caption', _, _, headers, rows) = toLegacyTable blkCapt specs thead tbody tfoot
   caption'' <- inlineListToOrg caption'
@@ -341,6 +352,7 @@ data DivBlockType
                              --   key-value pairs.
   | UnwrappedWithAnchor Text -- ^ Not mapped to other type, only
                              --   identifier is retained (if any).
+  deriving (Show)
 
 -- | Gives the most suitable method to render a list of blocks
 -- with attributes.
@@ -357,23 +369,39 @@ divBlockType (ident, classes, kvs)
   = UnwrappedWithAnchor ident
  where
   isGreaterBlockClass :: Text -> Bool
-  isGreaterBlockClass = (`elem` ["center", "quote"]) . T.toLower
+  isGreaterBlockClass t = case T.toLower t of
+                            "center" -> True
+                            "quote" -> True
+                            x -> isAdmonition x
+
+isAdmonition :: Text -> Bool
+isAdmonition "warning" = True
+isAdmonition "important" = True
+isAdmonition "tip" = True
+isAdmonition "note" = True
+isAdmonition "caution" = True
+isAdmonition _ = False
 
 -- | Converts a Div to an org-mode element.
 divToOrg :: PandocMonad m
          => Attr -> [Block] -> Org m (Doc Text)
 divToOrg attr bs = do
-  contents <- blockListToOrg bs
   case divBlockType attr of
-    GreaterBlock blockName attr' ->
+    GreaterBlock blockName attr' -> do
       -- Write as greater block. The ID, if present, is added via
       -- the #+name keyword; other classes and key-value pairs
       -- are kept as #+attr_html attributes.
-      return $ blankline $$ attrHtml attr'
+      contents <- case bs of
+                    (Div ("",["title"],[]) _ : bs')
+                      | isAdmonition blockName -> blockListToOrg bs'
+                    _ -> blockListToOrg bs
+      return $ blankline
+            $$ attrHtml attr'
             $$ "#+begin_" <> literal blockName
-            $$ contents
+            $$ chomp contents
             $$ "#+end_" <> literal blockName $$ blankline
     Drawer drawerName (_,_,kvs) -> do
+      contents <- blockListToOrg bs
       -- Write as drawer. Only key-value pairs are retained.
       let keys = vcat $ map (\(k,v) ->
                                ":" <> literal k <> ":"
@@ -383,6 +411,7 @@ divToOrg attr bs = do
             $$ contents $$ blankline
             $$ text ":END:" $$ blankline
     UnwrappedWithAnchor ident -> do
+      contents <- blockListToOrg bs
       -- Unwrap the div. All attributes are discarded, except for
       -- the identifier, which is added as an anchor before the
       -- div contents.
@@ -397,9 +426,13 @@ attrHtml (ident, classes, kvs) =
   let
     name = if T.null ident then mempty else "#+name: " <> literal ident <> cr
     keyword = "#+attr_html"
-    classKv = ("class", T.unwords classes)
-    kvStrings = map (\(k,v) -> ":" <> k <> " " <> v) (classKv:kvs)
-  in name <> keyword <> ": " <> literal (T.unwords kvStrings) <> cr
+    addClassKv = if null classes
+                    then id
+                    else (("class", T.unwords classes):)
+    kvStrings = map (\(k,v) -> ":" <> k <> " " <> v) (addClassKv kvs)
+  in name <> if null kvStrings
+                then mempty
+                else keyword <> ": " <> literal (T.unwords kvStrings) <> cr
 
 -- | Convert list of Pandoc block elements to Org.
 blockListToOrg :: PandocMonad m
@@ -489,7 +522,7 @@ inlineToOrg (Cite cs lst) = do
        return $ "[cite" <> sty <> ":" <> citeItems <> "]"
      else inlineListToOrg lst
 inlineToOrg (Code _ str) = return $ "=" <> literal str <> "="
-inlineToOrg (Str str) = return . literal $ escapeString str
+inlineToOrg (Str str) = return $ escapeString str
 inlineToOrg (Math t str) = do
   modify $ \st -> st{ stHasMath = True }
   return $ if t == InlineMath

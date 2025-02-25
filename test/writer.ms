@@ -436,8 +436,7 @@ Should not be a list item:
 .PP
 M.A.\ 2007
 .PP
-B.
-Williams
+B. Williams
 .HLINE
 .SH 1
 Definition Lists
@@ -644,8 +643,8 @@ So is \f[B]\f[BI]this\f[B]\f[R] word.
 .PP
 So is \f[B]\f[BI]this\f[B]\f[R] word.
 .PP
-This is code: \f[C]>\f[R], \f[C]$\f[R], \f[C]\[rs]\f[R], \f[C]\[rs]$\f[R],
-\f[C]<html>\f[R].
+This is code: \f[CR]>\f[R], \f[CR]$\f[R], \f[CR]\[rs]\f[R], \f[CR]\[rs]$\f[R],
+\f[CR]<html>\f[R].
 .PP
 \m[strikecolor]This is \f[I]strikeout\f[R].\m[]
 .PP
@@ -671,7 +670,7 @@ So is `pine.'
 .PP
 `He said, \[lq]I want to go.\[rq]' Were you alive in the 70\[cq]s?
 .PP
-Here is some quoted `\f[C]code\f[R]' and a \[lq]\c
+Here is some quoted `\f[CR]code\f[R]' and a \[lq]\c
 .pdfhref W -D "http://example.com/?foo=1&bar=2" -A "\c" \
  -- "quoted link"
 \&\[rq].
@@ -707,7 +706,7 @@ Here\[cq]s one that has a line break in it: @alpha + omega times x sup 2@.
 .LP
 These shouldn\[cq]t be math:
 .IP \[bu] 3
-To get the famous equation, write \f[C]$e = mc\[ha]2$\f[R].
+To get the famous equation, write \f[CR]$e = mc\[ha]2$\f[R].
 .IP \[bu] 3
 $22,000 is a \f[I]lot\f[R] of money.
 So is $34,000.
@@ -715,7 +714,7 @@ So is $34,000.
 .IP \[bu] 3
 Shoes ($20) and socks ($5).
 .IP \[bu] 3
-Escaped \f[C]$\f[R]: $73 \f[I]this should be emphasized\f[R] 23$.
+Escaped \f[CR]$\f[R]: $73 \f[I]this should be emphasized\f[R] 23$.
 .LP
 Here\[cq]s a LaTeX table:
 .HLINE
@@ -938,7 +937,7 @@ Blockquoted: \c
 \&
 .QE
 .LP
-Auto-links should not occur here: \f[C]<http://example.com/>\f[R]
+Auto-links should not occur here: \f[CR]<http://example.com/>\f[R]
 .IP
 .nf
 \f[C]
@@ -952,9 +951,14 @@ Images
 .pdfhref M "images"
 .LP
 From \[lq]Voyage dans la Lune\[rq] by Georges Melies (1902):
-[IMAGE: lalune]
+\" .IMAGE "lalune.jpg"
+.ce 1
+lalune
+.sp 1
 .LP
-Here is a movie [IMAGE: movie] icon.
+Here is a movie
+[IMAGE: movie] \" "movie.jpg"
+icon.
 .HLINE
 .SH 1
 Footnotes
@@ -991,7 +995,7 @@ This is \f[I]easier\f[R] to type.
 Inline notes may contain \c
 .pdfhref W -D "http://google.com" -A "\c" \
  -- "links"
-\& and \f[C]]\f[R] verbatim characters, as well as [bracketed text].
+\& and \f[CR]]\f[R] verbatim characters, as well as [bracketed text].
 .FE
 .QS
 .LP

@@ -4,7 +4,7 @@
 {-# LANGUAGE ViewPatterns          #-}
 {- |
    Module      : Text.Pandoc.Readers.LaTeX
-   Copyright   : Copyright (C) 2006-2023 John MacFarlane
+   Copyright   : Copyright (C) 2006-2024 John MacFarlane
    License     : GNU GPL, version 2 or above
 
    Maintainer  : John MacFarlane <jgm@berkeley.edu>
@@ -61,7 +61,8 @@ import Text.Pandoc.Readers.LaTeX.Table (tableEnvironments)
 import Text.Pandoc.Readers.LaTeX.Macro (macroDef)
 import Text.Pandoc.Readers.LaTeX.Lang (inlineLanguageCommands,
                                        enquoteCommands,
-                                       babelLangToBCP47, setDefaultLanguage)
+                                       babelLangToBCP47,
+                                       setDefaultLanguage)
 import Text.Pandoc.Readers.LaTeX.SIunitx (siunitxCommands)
 import Text.Pandoc.Readers.LaTeX.Inline (acronymCommands, refCommands,
                                          nameCommands, charCommands,
@@ -113,9 +114,9 @@ parseLaTeX = do
 
 resolveRefs :: M.Map Text [Inline] -> Inline -> Inline
 resolveRefs labels x@(Link (ident,classes,kvs) _ _) =
-  case (lookup "reference-type" kvs,
+  case (T.takeWhile (/='+') <$> lookup "reference-type" kvs,
         lookup "reference" kvs) of
-        (Just "ref", Just lab) ->
+        (Just "ref", Just lab) -> -- TODO special treatment of ref+label
           case M.lookup lab labels of
                Just txt -> Link (ident,classes,kvs) txt ("#" <> lab, "")
                Nothing  -> x
@@ -206,11 +207,13 @@ doLHSverb =
 
 mkImage :: PandocMonad m => [(Text, Text)] -> Text -> LP m Inlines
 mkImage options (T.unpack -> src) = do
-   let replaceTextwidth (k,v) =
+   let replaceRelative (k,v) =
          case numUnit v of
               Just (num, "\\textwidth") -> (k, showFl (num * 100) <> "%")
+              Just (num, "\\linewidth") -> (k, showFl (num * 100) <> "%")
+              Just (num, "\\textheight") -> (k, showFl (num * 100) <> "%")
               _                         -> (k, v)
-   let kvs = map replaceTextwidth
+   let kvs = map replaceRelative
              $ filter (\(k,_) -> k `elem` ["width", "height"]) options
    let attr = ("",[], kvs)
    let alt = maybe (str "image") str $ lookup "alt" options
@@ -530,9 +533,9 @@ ifToggle :: PandocMonad m => LP m ()
 ifToggle = do
   name <- braced
   spaces
-  yes <- braced
+  yes <- withVerbatimMode braced
   spaces
-  no <- braced
+  no <- withVerbatimMode braced
   toggles <- sToggles <$> getState
   TokStream _ inp <- getInput
   let name' = untokenize name
@@ -548,8 +551,8 @@ ifstrequal :: (PandocMonad m, Monoid a) => LP m a
 ifstrequal = do
   str1 <- tok
   str2 <- tok
-  ifequal <- braced
-  ifnotequal <- braced
+  ifequal <- withVerbatimMode braced
+  ifnotequal <- withVerbatimMode braced
   TokStream _ ts <- getInput
   if str1 == str2
      then setInput $ TokStream False (ifequal ++ ts)
@@ -1004,15 +1007,16 @@ skipSameFileToks = do
     skipMany $ infile (sourceName pos)
 
 environments :: PandocMonad m => M.Map Text (LP m Blocks)
-environments = M.union (tableEnvironments blocks inline) $
+environments = M.union (tableEnvironments block inline) $
    M.fromList
    [ ("document", env "document" blocks <* skipMany anyTok)
    , ("abstract", mempty <$ (env "abstract" blocks >>= addMeta "abstract"))
    , ("sloppypar", env "sloppypar" blocks)
    , ("letter", env "letter" letterContents)
-   , ("minipage", env "minipage" $
-          skipopts *> spaces *> optional braced *> spaces *> blocks)
+   , ("minipage", divWith ("",["minipage"],[]) <$>
+       env "minipage" (skipopts *> spaces *> optional braced *> spaces *> blocks))
    , ("figure", env "figure" $ skipopts *> figure')
+   , ("figure*", env "figure*" $ skipopts *> figure')
    , ("subfigure", env "subfigure" $ skipopts *> tok *> figure')
    , ("center", divWith ("", ["center"], []) <$> env "center" blocks)
    , ("quote", blockQuote <$> env "quote" blocks)
@@ -1045,7 +1049,23 @@ environments = M.union (tableEnvironments blocks inline) $
    , ("togglefalse", braced >>= setToggle False)
    , ("iftoggle", try $ ifToggle >> block)
    , ("CSLReferences", braced >> braced >> env "CSLReferences" blocks)
+   , ("otherlanguage", env "otherlanguage" otherlanguageEnv)
    ]
+
+otherlanguageEnv :: PandocMonad m => LP m Blocks
+otherlanguageEnv = do
+  skipopts
+  babelLang <- untokenize <$> braced
+  case babelLangToBCP47 babelLang of
+    Just lang -> divWith ("", [], [("lang", renderLang lang)]) <$> blocks
+    Nothing -> blocks
+
+langEnvironment :: PandocMonad m => Text -> LP m Blocks
+langEnvironment name =
+  case babelLangToBCP47 name of
+    Just lang ->
+      env name (divWith ("", [], [("lang", renderLang lang)]) <$> blocks)
+    Nothing -> mzero -- fall through to raw environment
 
 filecontents :: PandocMonad m => LP m Blocks
 filecontents = try $ do
@@ -1064,6 +1084,7 @@ environment = try $ do
   controlSeq "begin"
   name <- untokenize <$> braced
   M.findWithDefault mzero name environments <|>
+    langEnvironment name <|>
     theoremEnvironment blocks opt name <|>
     if M.member name (inlineEnvironments
                        :: M.Map Text (LP PandocPure Inlines))

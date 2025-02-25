@@ -76,7 +76,9 @@ processCitations (Pandoc meta bs) = do
   let citations = getCitations locale otherIdsMap $ Pandoc meta' bs
 
 
-  let linkCites = maybe False truish $ lookupMeta "link-citations" meta
+  let linkCites = maybe False truish (lookupMeta "link-citations" meta) &&
+                  -- don't link citations if no bibliography to link to:
+             not (maybe False truish (lookupMeta "suppress-bibliography" meta))
   let linkBib = maybe True truish $ lookupMeta "link-bibliography" meta
   let opts = defaultCiteprocOptions{ linkCitations = linkCites
                                    , linkBibliography = linkBib }
@@ -87,7 +89,7 @@ processCitations (Pandoc meta bs) = do
                 "csl-bib-body" :
                 ["hanging-indent" | styleHangingIndent sopts]
   let refkvs = (case styleEntrySpacing sopts of
-                   Just es | es > 0 -> (("entry-spacing",T.pack $ show es):)
+                   Just es -> (("entry-spacing",T.pack $ show es):)
                    _ -> id) .
                (case styleLineSpacing sopts of
                    Just ls | ls > 1 -> (("line-spacing",T.pack $ show ls):)
@@ -380,12 +382,12 @@ getBibliographyFormat fp mbmime = do
             _ -> Nothing
 
 isNote :: Inline -> Bool
-isNote (Cite _ [Note _]) = True
- -- the following allows citation styles that are "in-text" but use superscript
- -- references to be treated as if they are "notes" for the purposes of moving
- -- the citations after trailing punctuation (see <https://github.com/jgm/pandoc-citeproc/issues/382>):
-isNote (Cite _ [Superscript _]) = True
-isNote _                 = False
+isNote (Note _) = True
+-- the following allows citation styles that are "in-text" but use superscript
+-- references to be treated as if they are "notes" for the purposes of moving
+-- the citations after trailing punctuation (see <https://github.com/jgm/pandoc-citeproc/issues/382>):
+isNote (Superscript _) = True
+isNote _ = False
 
 isSpacy :: Inline -> Bool
 isSpacy Space     = True
@@ -403,9 +405,9 @@ mvPunct :: Bool -> Locale -> [Inline] -> [Inline]
 mvPunct moveNotes locale (x : xs)
   | isSpacy x = x : mvPunct moveNotes locale xs
 -- 'x [^1],' -> 'x,[^1]'
-mvPunct moveNotes locale (q : s : x : ys)
+mvPunct moveNotes locale (q : s : x@(Cite _ [il]) : ys)
   | isSpacy s
-  , isNote x
+  , isNote il
   = let spunct = T.takeWhile isPunctuation $ stringify ys
     in  if moveNotes
            then if T.null spunct
@@ -416,9 +418,8 @@ mvPunct moveNotes locale (q : s : x : ys)
                           (dropTextWhile isPunctuation (B.fromList ys)))
            else q : x : mvPunct moveNotes locale ys
 -- 'x[^1],' -> 'x,[^1]'
-mvPunct moveNotes locale (Cite cs ils : ys)
-   | not (null ils)
-   , isNote (last ils)
+mvPunct moveNotes locale (Cite cs ils@(_:_) : ys)
+   | isNote (last ils)
    , startWithPunct ys
    , moveNotes
    = let s = stringify ys
@@ -429,8 +430,10 @@ mvPunct moveNotes locale (Cite cs ils : ys)
                     ++ [last ils]) :
          mvPunct moveNotes locale
            (B.toList (dropTextWhile isPunctuation (B.fromList ys)))
-mvPunct moveNotes locale (s : x : ys) | isSpacy s, isNote x =
-  x : mvPunct moveNotes locale ys
+mvPunct moveNotes locale (s : x@(Cite _ [il]) : ys)
+  | isSpacy s
+  , isNote il
+  = x : mvPunct moveNotes locale ys
 mvPunct moveNotes locale (s : x@(Cite _ (Superscript _ : _)) : ys)
   | isSpacy s = x : mvPunct moveNotes locale ys
 mvPunct moveNotes locale (Cite cs ils : Str "." : ys)
@@ -479,9 +482,9 @@ isYesValue _ = False
 insertRefs :: [(Text,Text)] -> [Text] -> [Block] -> Pandoc -> Pandoc
 insertRefs _ _ [] d = d
 insertRefs refkvs refclasses refs (Pandoc meta bs) =
-  if isRefRemove meta
-     then Pandoc meta bs
-     else case runState (walkM go (Pandoc meta bs)) False of
+  case lookupMeta "suppress-bibliography" meta of
+    Just x | truish x -> Pandoc meta bs
+    _ -> case runState (walkM go (Pandoc meta bs)) False of
                (d', True) -> d'
                (Pandoc meta' bs', False)
                  -> Pandoc meta' $
@@ -516,10 +519,6 @@ refTitle meta =
     Just (MetaBlocks [Plain ils]) -> Just ils
     Just (MetaBlocks [Para ils])  -> Just ils
     _                             -> Nothing
-
-isRefRemove :: Meta -> Bool
-isRefRemove meta =
-  maybe False truish $ lookupMeta "suppress-bibliography" meta
 
 legacyDateRanges :: Reference Inlines -> Reference Inlines
 legacyDateRanges ref =
