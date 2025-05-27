@@ -604,6 +604,15 @@ blockToMarkdown' opts (BlockQuote blocks) = do
   return $ text leader <> prefixed leader contents <> blankline
 blockToMarkdown' opts t@(Table (ident,_,_) blkCapt specs thead tbody tfoot) = do
   let (caption, aligns, widths, headers, rows) = toLegacyTable blkCapt specs thead tbody tfoot
+  let isColRowSpans (Cell _ _ rs cs _) = rs > 1 || cs > 1
+  let rowHasColRowSpans (Row _ cs) = any isColRowSpans cs
+  let tbodyHasColRowSpans (TableBody _ _ rhs rs) =
+        any rowHasColRowSpans rhs || any rowHasColRowSpans rs
+  let theadHasColRowSpans (TableHead _ rs) = any rowHasColRowSpans rs
+  let tfootHasColRowSpans (TableFoot _ rs) = any rowHasColRowSpans rs
+  let hasColRowSpans = theadHasColRowSpans thead ||
+                       any tbodyHasColRowSpans tbody ||
+                       tfootHasColRowSpans tfoot
   let numcols = maximum (length aligns :| length widths :
                            map length (headers:rows))
   caption' <- inlineListToMarkdown opts caption
@@ -616,7 +625,7 @@ blockToMarkdown' opts t@(Table (ident,_,_) blkCapt specs thead tbody tfoot) = do
         = blankline $$ (": " <> caption'') $$ blankline
         | otherwise = blankline $$ caption'' $$ blankline
   let hasSimpleCells = onlySimpleTableCells $ headers : rows
-  let isSimple = hasSimpleCells && all (==0) widths
+  let isSimple = hasSimpleCells && all (==0) widths && not hasColRowSpans
   let isPlainBlock (Plain _) = True
       isPlainBlock _         = False
   let hasBlocks = not (all (all (all isPlainBlock)) $ headers:rows)
@@ -646,7 +655,7 @@ blockToMarkdown' opts t@(Table (ident,_,_) blkCapt specs thead tbody tfoot) = do
            tbl <- pipeTable opts (all null headers) aligns' widths'
                      rawHeaders rawRows
            return $ (tbl $$ caption''') $$ blankline
-       | not hasBlocks &&
+       | not (hasBlocks || hasColRowSpans) &&
          isEnabled Ext_multiline_tables opts -> do
            rawHeaders <- padRow <$> mapM (blockListToMarkdown opts) headers
            rawRows <- mapM (fmap padRow . mapM (blockListToMarkdown opts))
@@ -655,11 +664,12 @@ blockToMarkdown' opts t@(Table (ident,_,_) blkCapt specs thead tbody tfoot) = do
                      aligns' widths' rawHeaders rawRows
            return $ nest 2 (tbl $$ caption''') $$ blankline
        | isEnabled Ext_grid_tables opts &&
-          writerColumns opts >= 8 * numcols -> do
+          (hasColRowSpans || writerColumns opts >= 8 * numcols) -> do
            tbl <- gridTable opts blockListToMarkdown
-             (all null headers) aligns' widths' headers rows
+                     specs thead tbody tfoot
            return $ (tbl $$ caption''') $$ blankline
-       | hasSimpleCells &&
+       | hasSimpleCells,
+         not hasColRowSpans,
          isEnabled Ext_pipe_tables opts -> do
            rawHeaders <- padRow <$> mapM (blockListToMarkdown opts) headers
            rawRows <- mapM (fmap padRow . mapM (blockListToMarkdown opts))
@@ -709,14 +719,20 @@ blockToMarkdown' opts (DefinitionList items) = do
   return $ mconcat contents <> blankline
 blockToMarkdown' opts (Figure figattr capt body) = do
   let combinedAttr imgattr = case imgattr of
-        ("", cls, kv) | (figid, [], []) <- figattr -> Just (figid, cls, kv)
+        ("", cls, kv)
+          | (figid, [], []) <- figattr -> Just (figid, cls, kv)
+          | otherwise -> Just ("", cls, kv)
         _ -> Nothing
   let combinedAlt alt = case capt of
         Caption Nothing [] -> if null alt
                               then Just [Str "image"]
                               else Just alt
         Caption Nothing [Plain captInlines]
-          | captInlines == alt || null alt -> Just captInlines
+          | null alt || stringify captInlines == stringify alt
+            -> Just captInlines
+        Caption Nothing [Para captInlines]
+          | null alt || stringify captInlines == stringify alt
+            -> Just captInlines
         _ -> Nothing
   case body of
     [Plain [Image imgAttr alt (src, ttl)]]
@@ -763,8 +779,11 @@ figureToMarkdown opts attr@(ident, classes, kvs) capt body
       writeHtml5String
         opts{ writerTemplate = Nothing }
         (Pandoc nullMeta [Figure attr capt body])
-  | otherwise = let attr' = (ident, ["figure"] `union` classes, kvs)
-                in blockToMarkdown' opts (Div attr' body)
+  | otherwise = do
+      let attr' = (ident, ["figure"] `union` classes, kvs)
+      let Caption _mbshort caption = capt
+      let captionBs = [Div ("",["caption"],[]) caption | not (null caption)]
+      blockToMarkdown' opts (Div attr' (body <> captionBs))
 
 itemEndsWithTightList :: [Block] -> Bool
 itemEndsWithTightList bs =
@@ -783,6 +802,9 @@ bulletListItemToMarkdown opts bs = do
               Markua -> "* "
               Commonmark -> "- "
               Markdown
+                | isEnabled Ext_four_space_rule opts
+                  -> "- " <> T.replicate (writerTabStop opts - 2) " "
+              PlainText
                 | isEnabled Ext_four_space_rule opts
                   -> "- " <> T.replicate (writerTabStop opts - 2) " "
               _ -> "- "

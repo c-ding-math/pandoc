@@ -13,16 +13,14 @@ extra-deps:
 - skylighting-core-0.14.6
 - skylighting-0.14.6
 - skylighting-format-typst-0.1
-- citeproc-0.8.1.3
-- commonmark-extensions-0.2.6
-- commonmark-pandoc-0.2.3
-- git: https://github.com/jgm/typst-hs.git
-  commit: 66fa2666c4ae642e1d231010f4fe1621430af346
+- typst-symbols-0.1.8.1
+- citeproc-0.9.0.1
+- typst-0.8
 - git: https://github.com/jgm/texmath.git
-  commit: 1e2548e4b5a9c5eeecaf21c0726a0d5d0e635742
+  commit: d8919a615620522de4bb61214bc76ac18b4caba3
 ghc-options:
    "$locals": -fhide-source-paths -Wno-missing-home-modules
-resolver: lts-23.0
+resolver: lts-23.22
 nix:
   packages:
   - pkg-config

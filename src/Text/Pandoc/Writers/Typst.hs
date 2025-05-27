@@ -85,6 +85,7 @@ pandocToTypst options (Pandoc meta blocks) = do
                         Right l ->
                           resetField "lang" (langLanguage l) .
                           maybe id (resetField "region") (langRegion l))
+              $ defField "csl" (lookupMetaString "citation-style" meta) -- #10661
               $ defField "smart" (isEnabled Ext_smart options)
               $ defField "toc-depth" (tshow $ writerTOCDepth options)
               $ defField "figure-caption-position"
@@ -383,9 +384,12 @@ inlineToTypst inline =
       case res of
           Left il -> inlineToTypst il
           Right r ->
-            case mathType of
-              InlineMath -> return $ "$" <> literal r <> "$"
-              DisplayMath -> return $ "$ " <> literal r <> " $"
+            (case extractLabel str of -- #10805
+              Nothing -> id
+              Just lab -> (<> (toLabel FreestandingLabel lab))) <$>
+             case mathType of
+               InlineMath -> return $ "$" <> literal r <> "$"
+               DisplayMath -> return $ "$ " <> literal r <> " $"
     Code (_,cls,_) code -> return $
       case cls of
         (lang:_) -> "#raw(lang:" <> doubleQuoted lang <>
@@ -404,14 +408,15 @@ inlineToTypst inline =
     Superscript inlines -> textstyle "#super" inlines
     Subscript inlines -> textstyle "#sub" inlines
     SmallCaps inlines -> textstyle "#smallcaps" inlines
-    Span (ident,_,kvs) inlines -> do
+    Span (ident,cls,kvs) inlines -> do
       let lab = toLabel FreestandingLabel ident
       let (_, typstTextAttrs) = pickTypstAttrs kvs
-      case typstTextAttrs of
-        [] -> (<> lab) <$> inlinesToTypst inlines
-        _ -> do
-          contents <- inlinesToTypst inlines
-          return $ toTypstTextElement typstTextAttrs contents <> lab
+      contents <- inlinesToTypst inlines
+      let addHl x = "#highlight" <> brackets x
+      return $ (if "mark" `elem` cls
+                   then addHl
+                   else id)
+               (toTypstTextElement typstTextAttrs contents) <> lab
     Quoted quoteType inlines -> do
       opts <- gets stOptions
       let smart = isEnabled Ext_smart opts
@@ -603,3 +608,10 @@ doubleQuoted = doubleQuotes . literal . escape
 
 endCode :: Doc Text
 endCode = beforeNonBlank ";"
+
+extractLabel :: Text -> Maybe Text
+extractLabel = go . T.unpack
+ where
+   go [] = Nothing
+   go ('\\':'l':'a':'b':'e':'l':'{':xs) = Just (T.pack (takeWhile (/='}') xs))
+   go (_:xs) = go xs

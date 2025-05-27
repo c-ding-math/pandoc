@@ -246,6 +246,7 @@
 - Lucas V. R
 - Luis Rivera
 - Luke Plant
+- Manolis Stamatogiannakis
 - Marc Schreiber
 - Marcin Serwin
 - Mario Lang
@@ -287,6 +288,7 @@
 - Mikołaj Machowski
 - Milan Bracke
 - MinRK
+- Mohamed Akram
 - Morgan Willcock
 - Morton Fox
 - Nathan Gass
@@ -296,6 +298,7 @@
 - Nick Berendsen
 - Nick Fleisher
 - Nicolas Kaiser
+- Niklas Eicker
 - Nikolai Korobeinikov
 - Nikolay Yakimov
 - Nils Carlson
@@ -309,6 +312,7 @@
 - Oliver Fabel
 - Oliver Matthews
 - Olivier Benz
+- Olivier Dossmann
 - Ophir Lifshitz
 - Or Neeman
 - OvidiusCicero
@@ -386,6 +390,7 @@
 - Thomas Hodgson
 - Thomas Soeiro
 - Thomas Weißschuh
+- Tiago-Manzato
 - Tim Lin
 - Tim Stewart
 - Tim Wisotzki
@@ -445,12 +450,14 @@
 - dbecher-ito
 - ebiim
 - ech0
+- etclub
 - favonia
 - guqicun
 - harabat
 - hseg
 - infinity0x
 - jeongminkim-islab
+- josch
 - kaizshang91
 - lawcho
 - lifeunleaded

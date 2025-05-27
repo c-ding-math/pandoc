@@ -38,6 +38,7 @@ import System.FilePath
 import System.IO (stdout)
 import Text.Pandoc.Chunks (PathTemplate(..))
 import Text.Pandoc
+import Text.Pandoc.Filter (Filter(CiteprocFilter))
 import Text.Pandoc.App.Opt (Opt (..))
 import Text.Pandoc.App.CommandLineOptions (engines)
 import Text.Pandoc.Format (FlavoredFormat (..), applyExtensionsDiff,
@@ -83,16 +84,16 @@ optToOutputSettings scriptingEngine opts = do
                         _ -> pure Nothing
          liftIO $ pdfWriterAndProg outflavor (optPdfEngine opts)
        else case optTo opts of
-              Just f -> (, Nothing) <$> parseFlavoredFormat f
+              Just f -> (, optPdfEngine opts) <$> parseFlavoredFormat f
               Nothing
                | outputFile == "-" ->
-                   return (defaultOutputFlavor, Nothing)
+                   return (defaultOutputFlavor, optPdfEngine opts)
                | otherwise -> case formatFromFilePaths [outputFile] of
                    Nothing -> do
                      report $ CouldNotDeduceFormat
                        [T.pack $ takeExtension outputFile] defaultOutput
-                     return (defaultOutputFlavor,Nothing)
-                   Just f  -> return (f, Nothing)
+                     return (defaultOutputFlavor, optPdfEngine opts)
+                   Just f  -> return (f, optPdfEngine opts)
 
   when (format == "asciidoctor") $ do
     report $ Deprecated "asciidoctor" "use asciidoc instead"
@@ -121,7 +122,7 @@ optToOutputSettings scriptingEngine opts = do
                      then getAndCompile (tp <.> T.unpack format)
                      else throwError e)
 
-  (writer, writerExts, mtemplate) <-
+  (writer, writerExts', mtemplate) <-
     if "lua" `T.isSuffixOf` format
     then do
       let path = T.unpack format
@@ -150,6 +151,10 @@ optToOutputSettings scriptingEngine opts = do
         tmpl <- processCustomTemplate (compileDefaultTemplate format)
         return (w, wexts, tmpl)
 
+  -- see #10662:
+  let writerExts = if CiteprocFilter `elem` optFilters opts
+                      then disableExtension Ext_citations writerExts'
+                      else writerExts'
 
   let addSyntaxMap existingmap f = do
         res <- liftIO (parseSyntaxDefinition f)
@@ -191,6 +196,8 @@ optToOutputSettings scriptingEngine opts = do
     setVariableM "outputfile" (T.pack outputFile)
     >>=
     setVariableM "pandoc-version" pandocVersionText
+    >>=
+    maybe return (setVariableM "pdf-engine" . T.pack) maybePdfProg
     >>=
     setFilesVariableM "include-before" (optIncludeBeforeBody opts)
     >>=
