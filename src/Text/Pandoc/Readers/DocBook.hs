@@ -15,6 +15,7 @@ Conversion of DocBook XML to 'Pandoc' document.
 -}
 module Text.Pandoc.Readers.DocBook ( readDocBook ) where
 import Control.Monad (MonadPlus(mplus))
+import Control.Applicative ()
 import Control.Monad.State.Strict
     ( MonadTrans(lift),
       StateT(runStateT),
@@ -45,13 +46,14 @@ import Text.Pandoc.Builder
 import Text.Pandoc.Class.PandocMonad (PandocMonad, report)
 import Text.Pandoc.Options
 import Text.Pandoc.Logging (LogMessage(..))
-import Text.Pandoc.Shared (safeRead, extractSpaces)
+import Text.Pandoc.Shared (safeRead, addPandocAttributes)
 import Text.Pandoc.Sources (ToSources(..), sourcesToText)
 import Text.Pandoc.Transforms (headerShift)
 import Text.TeXMath (readMathML, writeTeX)
 import qualified Data.Map as M
 import Text.Pandoc.XML.Light
 import Text.Pandoc.Walk (query)
+import Text.Read (readMaybe)
 
 {-
 
@@ -171,7 +173,7 @@ List of all DocBook tags, with [x] indicating implemented,
 [ ] errorname - An error name
 [ ] errortext - An error message.
 [ ] errortype - The classification of an error message
-[ ] example - A formal example, with a title
+[x] example - A formal example, with a title
 [ ] exceptionname - The name of an exception
 [ ] fax - A fax number
 [ ] fieldsynopsis - The name of a field in a class definition
@@ -436,7 +438,7 @@ List of all DocBook tags, with [x] indicating implemented,
 [ ] shortaffil - A brief description of an affiliation
 [ ] shortcut - A key combination for an action that is also accessible through
     a menu
-[ ] sidebar - A portion of a document that is isolated from the main
+[x] sidebar - A portion of a document that is isolated from the main
     narrative flow
 [ ] sidebarinfo - Meta-information for a Sidebar
 [x] simpara - A paragraph that contains only text and inline markup, no block
@@ -546,6 +548,7 @@ data DBState = DBState{ dbSectionLevel  :: Int
                       , dbBook          :: Bool
                       , dbContent       :: [Content]
                       , dbLiteralLayout :: Bool
+                      , dbElementStack  :: [Text]
                       } deriving Show
 
 instance Default DBState where
@@ -554,7 +557,9 @@ instance Default DBState where
                , dbMeta = mempty
                , dbBook = False
                , dbContent = []
-               , dbLiteralLayout = False }
+               , dbLiteralLayout = False
+               , dbElementStack = []
+               }
 
 
 readDocBook :: (PandocMonad m, ToSources a)
@@ -619,9 +624,13 @@ named s e = qName (elName e) == s
 --
 
 addMetadataFromElement :: PandocMonad m => Element -> DB m Blocks
-addMetadataFromElement e =
-  mempty <$ mapM_ handleMetadataElement
+addMetadataFromElement e = do
+  -- Add metadata if at root or appropriate parent element
+  elementStack <- gets dbElementStack
+  if take 1 elementStack `elem` [[], ["book"], ["article"]]
+    then mempty <$ mapM_ handleMetadataElement
                   (filterChildren ((isMetadataField . qName . elName)) e)
+    else return mempty
  where
   handleMetadataElement elt =
     case qName (elName elt) of
@@ -722,9 +731,7 @@ blockTags = Set.fromList $
   , "articleinfo"
   , "attribution"
   , "authorinitials"
-  , "bibliodiv"
   , "biblioentry"
-  , "bibliography"
   , "bibliomisc"
   , "bibliomixed"
   , "blockquote"
@@ -763,31 +770,19 @@ blockTags = Set.fromList $
   , "preface"
   , "procedure"
   , "programlisting"
-  , "qandadiv"
   , "question"
-  , "refsect1"
   , "refsect1info"
-  , "refsect2"
   , "refsect2info"
-  , "refsect3"
   , "refsect3info"
-  , "refsection"
   , "refsectioninfo"
   , "screen"
-  , "sect1"
   , "sect1info"
-  , "sect2"
   , "sect2info"
-  , "sect3"
   , "sect3info"
-  , "sect4"
   , "sect4info"
-  , "sect5"
   , "sect5info"
-  , "section"
   , "sectioninfo"
   , "simpara"
-  , "simplesect"
   , "substeps"
   , "subtitle"
   , "table"
@@ -795,7 +790,13 @@ blockTags = Set.fromList $
   , "titleabbrev"
   , "toc"
   , "variablelist"
-  ] ++ admonitionTags
+  ] ++ sectionTags ++ admonitionTags
+
+sectionTags :: [Text]
+sectionTags = ["bibliography", "bibliodiv"
+              , "sect1", "sect2", "sect3", "sect4", "sect5", "section", "simplesect"
+              , "refsect1", "refsect2", "refsect3", "refsection", "qandadiv"
+              ]
 
 admonitionTags :: [Text]
 admonitionTags = ["caution","danger","important","note","tip","warning"]
@@ -851,9 +852,16 @@ getMediaobject e = do
   fmap (imageWith attr imageUrl tit) capt
 
 getBlocks :: PandocMonad m => Element -> DB m Blocks
-getBlocks e =  mconcat <$>
-                 mapM parseBlock (elContent e)
+getBlocks e = do
+  modify (\st -> st{ dbElementStack = qName (elName e) : dbElementStack st })
+  blocks <- mconcat <$> mapM parseBlock (elContent e)
+  modify (\st -> st{ dbElementStack = drop 1 $ dbElementStack st })
+  return blocks
 
+getRoleAttr :: Element -> [(Text, Text)] -- extract role attribute and add it to the attribute list
+getRoleAttr e = case attrValue "role" e of
+                  "" -> []
+                  r  -> [("role", r)]
 
 parseBlock :: PandocMonad m => Content -> DB m Blocks
 parseBlock (Text (CData CDataRaw _ _)) = return mempty -- DOCTYPE
@@ -861,8 +869,8 @@ parseBlock (Text (CData _ s _)) = if T.all isSpace s
                                      then return mempty
                                      else return $ plain $ trimInlines $ text s
 parseBlock (CRef x) = return $ plain $ str $ T.toUpper x
-parseBlock (Elem e) =
-  case qName (elName e) of
+parseBlock (Elem e) = do
+  parsedBlock <- case qName (elName e) of
         "toc"   -> skip -- skip TOC, since in pandoc it's autogenerated
         "index" -> skip -- skip index, since page numbers meaningless
         "para"  -> parseMixed para (elContent e)
@@ -911,8 +919,8 @@ parseBlock (Elem e) =
         "refsect2" -> sect 2
         "refsect3" -> sect 3
         "refsection" -> gets dbSectionLevel >>= sect . (+1)
-        l | l `elem` titledBlockElements -> parseAdmonition l
-        l | l `elem` admonitionTags -> parseAdmonition l
+        l | l `elem` titledBlockElements -> parseAdmonition False l
+        l | l `elem` admonitionTags -> parseAdmonition True l
         "area" -> skip
         "areaset" -> skip
         "areaspec" -> skip
@@ -931,9 +939,7 @@ parseBlock (Elem e) =
                                "lowerroman" -> LowerRoman
                                "upperroman" -> UpperRoman
                                _            -> Decimal
-          let start = fromMaybe 1 $
-                      filterElement (named "listitem") e
-                       >>= safeRead . attrValue "override"
+          let start = fromMaybe 1 $ safeRead $ attrValue "startingnumber" e
           orderedListWith (start,listStyle,DefaultDelim) . handleCompact
             <$> listitems
         "variablelist" -> definitionList <$> deflistitems
@@ -976,6 +982,9 @@ parseBlock (Elem e) =
         "title" -> return mempty     -- handled in parent element
         "subtitle" -> return mempty  -- handled in parent element
         _ -> skip >> getBlocks e
+  if qName (elName e) `elem` sectionTags
+     then return parsedBlock
+     else return $ addPandocAttributes (getRoleAttr e) parsedBlock
    where skip = do
            let qn = qName $ elName e
            let name = if "pi-" `T.isPrefixOf` qn
@@ -1056,9 +1065,8 @@ parseBlock (Elem e) =
                                        cs -> mapMaybe (findAttr (unqual "colname" )) cs
                       let isRow x = named "row" x || named "tr" x
                       headrows <- case filterChild (named "thead") e' of
-                                       Just h  -> case filterChild isRow h of
-                                                       Just x  -> parseRow colnames x
-                                                       Nothing -> return []
+                                       Just h  -> mapM (parseRow colnames)
+                                                  $ filterChildren isRow h
                                        Nothing -> return []
                       bodyrows <- case filterChild (named "tbody") e' of
                                        Just b  -> mapM (parseRow colnames)
@@ -1072,7 +1080,7 @@ parseBlock (Elem e) =
                                                       || x == '.') w
                             if n > 0 then Just n else Nothing
                       let numrows = maybe 0 maximum $ nonEmpty
-                                                    $ map length bodyrows
+                                                    $ map length (bodyrows ++ headrows)
                       let aligns = case colspecs of
                                      [] -> replicate numrows AlignDefault
                                      cs -> map toAlignment cs
@@ -1094,11 +1102,10 @@ parseBlock (Elem e) =
                                                             in  ColWidth . scale <$> ws'
                                                 Nothing  -> replicate numrows ColWidthDefault
                       let toRow = Row nullAttr
-                          toHeaderRow l = [toRow l | not (null l)]
                       return $ tableWith (elId,classes,attrs)
                                      (simpleCaption $ plain capt)
                                      (zip aligns widths)
-                                     (TableHead nullAttr $ toHeaderRow headrows)
+                                     (TableHead nullAttr $ map toRow headrows)
                                      [TableBody nullAttr 0 [] $ map toRow bodyrows]
                                      (TableFoot nullAttr [])
          sect n = sectWith(attrValue "id" e) [] [] n
@@ -1113,7 +1120,10 @@ parseBlock (Elem e) =
            modify $ \st -> st{ dbSectionLevel = n }
            b <- getBlocks e
            modify $ \st -> st{ dbSectionLevel = n - 1 }
-           return $ headerWith (elId, classes, maybeToList titleabbrevElAsAttr++attrs) n' headerText <> b
+           let hdr = addPandocAttributes (getRoleAttr e)
+                        $ headerWith (elId, classes, maybeToList titleabbrevElAsAttr ++ attrs)
+                                      n' headerText
+           return $ hdr <> b
          titleabbrevElAsAttr =
            case filterChild (named "titleabbrev") e `mplus`
                 (filterChild (named "info") e >>=
@@ -1136,17 +1146,20 @@ parseBlock (Elem e) =
            b <- p
            case mbt of
              Nothing -> return b
-             Just t -> return $ divWith (attrValue "id" e,[],[])
+             Just t -> return $ divWith (attrValue "id" e, [], getRoleAttr e)
                          (divWith ("", ["title"], []) (plain t) <> b)
 
          -- Admonitions are parsed into a div. Following other Docbook tools that output HTML,
          -- we parse the optional title as a div with the @title@ class, and give the
          -- block itself a class corresponding to the admonition name.
-         parseAdmonition label = do
+         parseAdmonition alwaysIncludeTitle label = do
            mbt <- getTitle
            -- this will ignore the title element if it is present:
            b <- getBlocks e
-           let t = divWith ("", ["title"], []) (plain $ fromMaybe mempty mbt)
+           let t = maybe mempty (divWith ("", ["title"], []) . plain)
+                        (case mbt of
+                           Nothing | alwaysIncludeTitle -> Just mempty
+                           _ -> mbt)
            -- we also attach the label as a class, so it can be styled properly
            return $ divWith (attrValue "id" e,[label],[]) (t <> b)
 
@@ -1172,7 +1185,7 @@ parseMixed container conts = do
 
 parseRow :: PandocMonad m => [Text] -> Element -> DB m [Cell]
 parseRow cn = do
-  let isEntry x  = named "entry" x || named "td" x || named "th" x
+  let isEntry x = named "entry" x || named "td" x || named "th" x
   mapM (parseEntry cn) . filterChildren isEntry
 
 parseEntry :: PandocMonad m => [Text] -> Element -> DB m Cell
@@ -1189,9 +1202,18 @@ parseEntry cn el = do
         case (mStrt, mEnd) of
           (Just start, Just end) -> colDistance start end
           _ -> 1
+  let rowDistance mr = do
+        case readMaybe $ T.unpack mr :: Maybe Int of
+          Just moreRow -> RowSpan $ moreRow + 1
+          _ -> 1
+  let toRowSpan en = do
+        case findAttr (unqual "morerows") en of
+          Just moreRow -> rowDistance moreRow
+          _ -> 1
   let colSpan = toColSpan el
+  let rowSpan = toRowSpan el
   let align = toAlignment el
-  (fmap (cell align 1 colSpan) . parseMixed plain . elContent) el
+  (fmap (cell align rowSpan colSpan) . parseMixed plain . elContent) el
 
 getInlines :: PandocMonad m => Element -> DB m Inlines
 getInlines e' = trimInlines . mconcat <$>
@@ -1227,8 +1249,8 @@ parseInline (Text (CData _ s _)) = do
      else return $ text s
 parseInline (CRef ref) =
   return $ text $ fromMaybe (T.toUpper ref) $ lookupEntity ref
-parseInline (Elem e) =
-  case qName (elName e) of
+parseInline (Elem e) = do
+  parsedInline <- case qName (elName e) of
         "anchor" -> do
            return $ spanWith (attrValue "id" e, [], []) mempty
         "phrase" -> do
@@ -1350,6 +1372,9 @@ parseInline (Elem e) =
         -- <?asciidor-br?> to in handleInstructions, above.
         "pi-asciidoc-br" -> return linebreak
         _          -> skip >> innerInlines id
+  return $ case qName (elName e) of
+    "emphasis" -> parsedInline
+    _ -> addPandocAttributes (getRoleAttr e) parsedInline
    where skip = do
            let qn = qName $ elName e
            let name = if "pi-" `T.isPrefixOf` qn
@@ -1358,8 +1383,7 @@ parseInline (Elem e) =
            lift $ report $ IgnoredElement name
            return mempty
 
-         innerInlines f = extractSpaces f . mconcat <$>
-                          mapM parseInline (elContent e)
+         innerInlines f = f . mconcat <$> mapM parseInline (elContent e)
          codeWithLang = do
            let classes' = case attrValue "language" e of
                                "" -> []

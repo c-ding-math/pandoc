@@ -157,6 +157,7 @@ data LaTeXState = LaTeXState{ sOptions       :: ReaderOptions
                             , sLogMessages   :: [LogMessage]
                             , sIdentifiers   :: Set.Set Text
                             , sVerbatimMode  :: Bool
+                            , sMathMode      :: Bool
                             , sCaption       :: Maybe Caption
                             , sInListItem    :: Bool
                             , sInTableCell   :: Bool
@@ -164,6 +165,7 @@ data LaTeXState = LaTeXState{ sOptions       :: ReaderOptions
                             , sLastFigureNum :: DottedNum
                             , sLastTableNum  :: DottedNum
                             , sLastNoteNum   :: Int
+                            , sFootnoteTexts :: M.Map Int Blocks
                             , sTheoremMap    :: M.Map Text TheoremSpec
                             , sLastTheoremStyle :: TheoremStyle
                             , sLastLabel     :: Maybe Text
@@ -186,6 +188,7 @@ defaultLaTeXState = LaTeXState{ sOptions       = def
                               , sLogMessages   = []
                               , sIdentifiers   = Set.empty
                               , sVerbatimMode  = False
+                              , sMathMode      = False
                               , sCaption       = Nothing
                               , sInListItem    = False
                               , sInTableCell   = False
@@ -193,6 +196,7 @@ defaultLaTeXState = LaTeXState{ sOptions       = def
                               , sLastFigureNum = DottedNum []
                               , sLastTableNum  = DottedNum []
                               , sLastNoteNum   = 0
+                              , sFootnoteTexts = M.empty
                               , sTheoremMap    = M.empty
                               , sLastTheoremStyle = PlainStyle
                               , sLastLabel     = Nothing
@@ -277,7 +281,7 @@ withVerbatimMode parser = do
        return result
 
 rawLaTeXParser :: (PandocMonad m, HasMacros s, HasReaderOptions s, Show a)
-               => [Tok] -> LP m a -> LP m a
+               => [Tok] -> LP m () -> LP m a
                -> ParsecT Sources s m (a, Text)
 rawLaTeXParser toks parser valParser = do
   pstate <- getState
@@ -299,14 +303,14 @@ rawLaTeXParser toks parser valParser = do
               Left _    -> mzero
               Right ((val, raw), st) -> do
                 updateState (updateMacros ((NonEmpty.head (sMacros st)) <>))
-                let skipTilPos stopPos = do
-                      anyChar
+                let rawChar = do
                       pos <- getPosition
-                      if pos >= stopPos
-                         then return ()
-                         else skipTilPos stopPos
-                skipTilPos endpos
-                let result = untokenize raw
+                      if pos >= endpos
+                         then mzero
+                         else anyChar
+                result <- (guardEnabled Ext_latex_macros
+                             >> (untokenize raw <$ skipMany rawChar))
+                          <|> T.pack <$> many rawChar
                 -- ensure we end with space if input did, see #4442
                 let result' =
                       case reverse toks' of
@@ -648,13 +652,30 @@ trySpecialMacro "xspace" ts = do
     Tok pos Word t : _
       | startsWithAlphaNum t -> return $ Tok pos Spaces " " : ts'
     _ -> return ts'
-trySpecialMacro "iftrue" ts = handleIf True ts
-trySpecialMacro "iffalse" ts = handleIf False ts
+trySpecialMacro "iftrue" ts = handleIf (ifParser True) ts
+trySpecialMacro "iffalse" ts = handleIf (ifParser False) ts
+trySpecialMacro "ifmmode" ts = do
+  mathMode <- sMathMode <$> getState
+  handleIf (ifParser mathMode) ts
+trySpecialMacro "ifstrequal" ts = do
+  handleIf ifStrequalParser ts
 trySpecialMacro _ _ = mzero
 
-handleIf :: PandocMonad m => Bool -> [Tok] -> LP m [Tok]
-handleIf b ts = do
-  res' <- lift $ runParserT (ifParser b) defaultLaTeXState "tokens"
+ifStrequalParser :: PandocMonad m => LP m [Tok]
+ifStrequalParser = do
+  str1 <- braced <|> count 1 anyTok
+  str2 <- braced <|> count 1 anyTok
+  ifequal <- withVerbatimMode (braced <|> count 1 anyTok)
+  ifnotequal <- withVerbatimMode (braced <|> count 1 anyTok)
+  TokStream _ ts <- getInput
+  return $
+    if untokenize str1 == untokenize str2
+       then ifequal ++ ts
+       else ifnotequal ++ ts
+
+handleIf :: PandocMonad m => LP m [Tok] -> [Tok] -> LP m [Tok]
+handleIf parser ts = do
+  res' <- lift $ runParserT parser defaultLaTeXState "tokens"
                $ TokStream False ts
   case res' of
     Left _ -> Prelude.fail "Could not parse conditional"

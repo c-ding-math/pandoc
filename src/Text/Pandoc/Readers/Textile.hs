@@ -38,7 +38,8 @@ module Text.Pandoc.Readers.Textile ( readTextile) where
 import Control.Monad (guard, liftM)
 import Control.Monad.Except (throwError)
 import Data.Char (digitToInt, isUpper)
-import Data.List (intersperse, transpose, foldl')
+import Data.List (intersperse, transpose)
+import qualified Data.List as L
 import Data.List.NonEmpty (NonEmpty(..), nonEmpty)
 import qualified Data.Map as M
 import Data.Text (Text)
@@ -412,8 +413,12 @@ tableCell = try $ do
   notFollowedBy blankline
   raw <- trim . T.pack <$>
          many (noneOf "|\n" <|> try (char '\n' <* notFollowedBy blankline))
-  content <- mconcat <$> parseFromString' (many inline) raw
-  return ((isHeader, alignment), B.plain content)
+  content <- parseFromString' parseBlocks (raw <> "\n\n")
+  -- Convert lone Para to Plain for backward compatibility
+  let content' = case B.toList content of
+                   [Para ils] -> B.plain (B.fromList ils)
+                   _          -> content
+  return ((isHeader, alignment), content')
 
 -- | A table row is made of many table cells
 tableRow :: PandocMonad m => TextileParser m [((Bool, Alignment), Blocks)]
@@ -732,7 +737,7 @@ orderedListStartAttr = do
 
 -- | Html / CSS attributes
 attributes :: PandocMonad m => TextileParser m Attr
-attributes = foldl' (flip ($)) ("",[],[]) <$>
+attributes = L.foldl' (flip ($)) ("",[],[]) <$>
   try (do special <- option id specialAttribute
           attrs <- many attribute
           return (special : attrs))

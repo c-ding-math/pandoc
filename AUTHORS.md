@@ -6,6 +6,7 @@
 - Akash Patel
 - Akos Marton
 - Albert Krewinkel
+- Albert Lei
 - Alex Ivkin
 - Alex Toldaiev
 - Alex Vong
@@ -32,6 +33,8 @@
 - Aner Lucero
 - Anti-Distinctlyminty
 - Antoine Latter
+- Anton Antich
+- Anton Melnikov
 - Antonio Terceiro
 - Arata Mizuki
 - Arata Mizuki
@@ -39,6 +42,7 @@
 - Arlo O'Keeffe
 - Artem Pelenitsyn
 - Artyom Kazak
+- Asliddinbek Azizovich
 - B. Scott Michel
 - Bastien Dumont
 - Ben Firshman
@@ -72,12 +76,14 @@
 - Charles Tapley Hoyt
 - Charlotte Koch
 - Chris Black
+- Chris Callison-Burch
 - Christian Conkle
 - Christian Christiansen
 - Christian Despres
 - Christoffer Ackelman
 - Christoffer Sawicki
 - Christophe Dervieux
+- Christopher Kenny
 - Clare Macrae
 - Clint Adams
 - Conal Elliott
@@ -107,12 +113,14 @@
 - Eigil Rischel
 - Elliot Bobrow
 - Emanuel Evans
+- Emmanuel Ferdman
 - Emerson Harkin
 - Emily Bourke
 - Emily Eisenberg
 - Eric Kow
 - Eric Schrijver
 - Eric Seidel
+- Erik Post
 - Erik Rask
 - Ethan Riley
 - Étienne Bersac
@@ -126,6 +134,7 @@
 - Florian Eitel
 - Florian Klink
 - Florian Kohrt
+- FoxChillz
 - Francesco Mazzoli
 - Francesco Occhipinti
 - François Gannaz
@@ -170,6 +179,7 @@
 - Ivar de Bruin
 - Ivo Clarysse
 - Jaap de Jong
+- Jacob Larkin
 - James J Balamuta
 - J. B. Rainsberger
 - J. Lewis Muir
@@ -180,6 +190,7 @@
 - Jakob Voß
 - James Aspnes
 - James P. Ascher
+- James Barlow
 - James Scott-Brown
 - Jamie F. Olson
 - Jan Larres
@@ -340,13 +351,17 @@
 - R. N. West
 - Ralf Stephan
 - Raniere Silva
+- Raymond Berger
 - Raymond Ehlers
 - Recai Oktaş
+- Repetitive
+- Reuben Thomas
 - Rowan Rodrik van der Molen
 - Roland Hieber
 - Roman Beránek
 - Ruqi
 - RyanGlScott
+- Ryan Gibb
 - S.P.H
 - Salim B
 - Sam S. Almahri
@@ -356,6 +371,7 @@
 - Santiago Zarate
 - Sascha Wilde
 - Scott Morrison
+- Sean Soon
 - Sebastian Talmon
 - Sebbones
 - Sen-wen Deng
@@ -429,15 +445,18 @@
 - Wout Gevaert
 - Xavier Olive
 - Yan Pashkovsky
+- Yann Trividic
 - Yehuda Katz
 - YI
 - Yoan Blanc
+- You Jiangbin
 - Yuchen Pei
 - Zihang Chen
 - 3w36zj6
 - arcnmx
 - a-vrma
 - andrebauer
+- benniekiss
 - black-desk
 - blmage
 - bucklereed
@@ -454,6 +473,7 @@
 - etclub
 - favonia
 - guqicun
+- har7an
 - harabat
 - hseg
 - infinity0x
@@ -465,6 +485,7 @@
 - lux-lth
 - luz paz
 - lwolfsonkin
+- massifrg
 - mbracke
 - mbrackeantidot
 - mh4ckt3mh4ckt1c4s
@@ -483,6 +504,7 @@
 - priiduonu
 - qerub
 - quasicomputational
+- reptee
 - ricnorr
 - robabla
 - roblabla

@@ -281,6 +281,7 @@ charCommands = M.fromList
   , ("_", lit "_")
   , ("{", lit "{")
   , ("}", lit "}")
+  , ("-", lit "\x00ad") -- soft hyphen
   , ("qed", lit "\a0\x25FB")
   , ("lq", return (str "‘"))
   , ("rq", return (str "’"))
@@ -314,6 +315,26 @@ charCommands = M.fromList
   , ("dothyp", lit ".\173")
   , ("colonhyp", lit ":\173")
   , ("hyp", lit "-")
+  -- ngerman (babel)
+  , ("glq", lit "‚")
+  , ("grq", lit "‘")
+  , ("glqq", lit "„")
+  , ("grqq", lit "“")
+  , ("flq", lit "‹")
+  , ("frq", lit "›")
+  , ("flqq", lit "«")
+  , ("frqq", lit "»")
+  , ("dq", lit "\"")
+  -- fontspec
+  , ("guillemetleft", lit "«")
+  , ("guillemotleft", lit "«")
+  , ("guillemetright", lit "»")
+  , ("guillemotright", lit "»")
+  , ("guilsinglleft", lit "‹")
+  , ("guilsinglright", lit "›")
+  , ("quotedblbase", lit "„")
+  , ("quotesinglbase", lit ",")
+  , ("textquotedbl", lit "\"")
   ]
 
 biblatexInlineCommands :: PandocMonad m

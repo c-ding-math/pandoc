@@ -21,6 +21,7 @@ module Text.Pandoc.App.CommandLineOptions (
           , options
           , engines
           , setVariable
+          , versionInfo
           ) where
 import Control.Monad.Trans
 import Control.Monad.State.Strict
@@ -30,7 +31,8 @@ import Data.Aeson.Encode.Pretty (encodePretty', Config(..), keyOrder,
          defConfig, Indent(..), NumberFormat(..))
 import Data.Bifunctor (second)
 import Data.Char (toLower)
-import Data.List (intercalate, sort, foldl')
+import Data.List (intercalate, sort)
+import qualified Data.List as L
 #ifdef _WINDOWS
 import Data.List (isPrefixOf)
 #endif
@@ -46,6 +48,7 @@ import System.IO (stdout)
 import Text.DocTemplates (Context (..), ToContext (toVal), Val (..))
 import Text.Pandoc
 import Text.Pandoc.Builder (setMeta)
+import Data.Version (showVersion)
 import Text.Pandoc.App.Opt (Opt (..), LineEnding (..), IpynbOutput (..),
                             DefaultsState (..), applyDefaults,
                             fullDefaultsPath, OptInfo(..))
@@ -98,7 +101,7 @@ parseOptionsFromArgs options' defaults prg rawArgs = do
 
   if (null errors && null unknownOptionErrors)
      then -- thread option data structure through all supplied option actions
-       runExceptT $ adjustOpts <$> (foldl' (>>=) (return defaults) actions)
+       runExceptT $ adjustOpts <$> (L.foldl' (>>=) (return defaults) actions)
      else return $ Left $ OptError $ PandocOptionError $ T.pack $
              concat errors ++ unlines unknownOptionErrors ++
              ("Try " ++ prg ++ " --help for more information.")
@@ -193,14 +196,7 @@ handleOptInfo engine info = E.handle (handleError . Left) $ do
                      ,"text-styles"])
                   ,confNumFormat = Generic
                   ,confTrailingNewline = True} sty
-    VersionInfo -> do
-      prg <- getProgName
-      defaultDatadir <- defaultUserDataDir
-      UTF8.hPutStrLn stdout
-       $ T.pack
-       $ prg ++ " " ++ T.unpack pandocVersionText ++
-         "\nUser data directory: " ++ defaultDatadir ++
-         ('\n':copyrightMessage)
+    VersionInfo -> versionInfo [] Nothing ""
     Help -> do
       prg <- getProgName
       UTF8.hPutStr stdout (T.pack $ usageMessage prg options)
@@ -210,7 +206,8 @@ handleOptInfo engine info = E.handle (handleError . Left) $ do
 -- | Supported LaTeX engines; the first item is used as default engine
 -- when going through LaTeX.
 latexEngines :: [String]
-latexEngines  = ["pdflatex", "lualatex", "xelatex", "latexmk", "tectonic"]
+latexEngines  = [ "pdflatex", "lualatex", "xelatex", "latexmk", "tectonic"
+                , "pdflatex-dev", "lualatex-dev" ]
 
 -- | Supported HTML PDF engines; the first item is used as default
 -- engine when going through HTML.
@@ -524,13 +521,18 @@ options =
 
     , Option "" ["no-highlight"]
                 (NoArg
-                 (\opt -> return opt { optHighlightStyle = Nothing }))
+                 (\opt -> do
+                     deprecatedOption "--no-highlight"
+                       "Use --syntax-highlighting=none instead."
+                     return opt { optSyntaxHighlighting = NoHighlightingString }))
                  "" -- "Don't highlight source code"
 
     , Option "" ["highlight-style"]
                 (ReqArg
-                 (\arg opt ->
-                     return opt{ optHighlightStyle = Just $
+                 (\arg opt -> do
+                     deprecatedOption "--highlight-style"
+                       "Use --syntax-highlighting instead."
+                     return opt{ optSyntaxHighlighting =
                                  T.pack $ normalizePath arg })
                  "STYLE|FILE")
                  "" -- "Style for highlighted code"
@@ -542,6 +544,14 @@ options =
                                 optSyntaxDefinitions opt })
                  "FILE")
                 "" -- "Syntax definition (xml) file"
+
+    , Option "" ["syntax-highlighting"]
+                (ReqArg
+                 (\arg opt -> return opt{ optSyntaxHighlighting =
+                                 T.pack $ normalizePath arg })
+                 "none|default|idiomatic|<stylename>|<themepath>")
+                 "" -- "syntax highlighting method for code"
+
 
     , Option "" ["dpi"]
                  (ReqArg
@@ -602,8 +612,8 @@ options =
                         then return opt { optPdfEngine = Just arg }
                         else optError $
                               PandocOptionError $ T.pack $
-                              "Argument of --pdf-engine must be one of "
-                               ++ intercalate ", " pdfEngines)
+                              "Argument of --pdf-engine must be one of\n"
+                               ++ concatMap (\e -> "\t" <> e <> "\n") pdfEngines)
                   "PROGRAM")
                  "" -- "Name of program to use in generating PDF"
 
@@ -813,8 +823,14 @@ options =
     , Option "" ["listings"]
                  (OptArg
                   (\arg opt -> do
-                        boolValue <- readBoolFromOptArg "--listings" arg
-                        return opt { optListings = boolValue })
+                      deprecatedOption "--listings"
+                        "Use --syntax-highlighting=idiomatic instead."
+                      boolValue <- readBoolFromOptArg "--listings" arg
+                      return $
+                        if boolValue
+                        then opt { optSyntaxHighlighting =
+                                   IdiomaticHighlightingString }
+                        else opt)
                   "true|false")
                  "" -- "Use listings package for LaTeX code blocks"
 
@@ -1027,8 +1043,8 @@ options =
     , Option "" ["webtex"]
                  (OptArg
                   (\arg opt -> do
-                      let url' = fromMaybe "https://latex.codecogs.com/png.latex?" arg
-                      return opt { optHTMLMathMethod = WebTeX $ T.pack url' })
+                      let url' = maybe defaultWebTeXURL T.pack arg
+                      return opt { optHTMLMathMethod = WebTeX url' })
                   "URL")
                  "" -- "Use web service for HTML math"
 
@@ -1172,7 +1188,7 @@ usageMessage programName = usageInfo (programName ++ " [OPTIONS] [FILES]")
 
 copyrightMessage :: String
 copyrightMessage = intercalate "\n" [
- "Copyright (C) 2006-2024 John MacFarlane. Web:  https://pandoc.org",
+ "Copyright (C) 2006-2025 John MacFarlane. Web:  https://pandoc.org",
  "This is free software; see the source for copying conditions. There is no",
  "warranty, not even for merchantability or fitness for a particular purpose." ]
 
@@ -1270,3 +1286,21 @@ normalizePath fp =
 #else
 normalizePath = id
 #endif
+
+-- | Print version information with customizable features and scripting engine
+versionInfo :: [String] -> Maybe String -> String -> IO ()
+versionInfo features mbScriptingEngineName suffix = do
+  defaultDatadir <- defaultUserDataDir
+  let featuresLine = if null features
+                       then []
+                       else ["Features: " ++ unwords features]
+  let scriptingLine = case mbScriptingEngineName of
+                        Nothing -> []
+                        Just name -> ["Scripting engine: " ++ name]
+  UTF8.putStr $ T.unlines $ map T.pack $
+    ["pandoc " ++ showVersion pandocVersion ++ suffix] ++
+    featuresLine ++
+    scriptingLine ++
+    ["User data directory: " ++ defaultDatadir,
+     copyrightMessage]
+  exitSuccess

@@ -1,7 +1,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 {- |
    Module      : Text.Pandoc.Writers.ANSI
-   Copyright   : Copyright (C) 2024 Evan Silberman
+   Copyright   : © 2024 Evan Silberman
+                 © 2025 Pandoc contributors
    License     : GNU GPL, version 2 or above
 
    Maintainer  : John MacFarlane <jgm@berkeley.edu>
@@ -14,6 +15,7 @@ module Text.Pandoc.Writers.ANSI ( writeANSI ) where
 import Control.Monad.State.Strict ( StateT, gets, modify, evalStateT )
 import Control.Monad (foldM)
 import Data.List (intersperse)
+import qualified Data.Map as M
 import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Text.DocLayout ((<+>), ($$), ($+$))
@@ -30,6 +32,7 @@ import Text.Pandoc.Writers.Shared
 import qualified Data.Text as T
 import Data.Text.Lazy (toStrict)
 import qualified Text.DocLayout as D
+import qualified Text.Pandoc.Highlighting as HL
 
 hr :: D.HasChars a => D.Doc a
 hr = rule 20
@@ -76,26 +79,37 @@ pandocToANSI opts (Pandoc meta blocks) = do
   metadata <- metaToContext opts
                  (blockListToANSI opts)
                  (inlineListToANSI opts) meta
-  width <- gets stColumns
-  let title = titleBlock width metadata
+  let colwidth = if writerWrapText opts == WrapAuto
+                    then Just $ writerColumns opts
+                    else Nothing
+  let title = titleBlock colwidth metadata
   let blocks' = makeSections (writerNumberSections opts) Nothing blocks
   body <- blockListToANSI opts blocks'
   notes <- gets $ reverse . stNotes
   let notemark x = D.literal (tshow (x :: Int) <> ".") <+> D.space
   let marks = map notemark [1..length notes]
   let hangWidth = foldr (max . D.offset) 0 marks
-  let notepretty | not (null notes) = D.cblock width hr $+$ hangMarks hangWidth marks notes
-                 | otherwise = D.empty
+  let notepretty
+       | not (null notes) =
+          (case colwidth of
+            Nothing -> hr
+            Just w  -> D.cblock w hr)
+          $+$ hangMarks hangWidth marks notes
+       | otherwise = D.empty
   let main = body $+$ notepretty
   let context = defField "body" main
               $ defField "titleblock" title metadata
   return $
     case writerTemplate opts of
-         Nothing  -> toStrict $ D.renderANSI (Just width) main
-         Just tpl -> toStrict $ D.renderANSI (Just width) $ renderTemplate tpl context
+         Nothing  -> toStrict $ D.renderANSI colwidth main
+         Just tpl -> toStrict $ D.renderANSI colwidth
+                              $ renderTemplate tpl context
 
-titleBlock :: Int -> Context Text -> D.Doc Text
-titleBlock width meta = if null most then D.empty else D.cblock width $ most $+$ hr
+titleBlock :: Maybe Int -> Context Text -> D.Doc Text
+titleBlock width meta =
+  if null most
+     then D.empty
+     else (maybe id D.cblock width) $ most $+$ hr
   where
     title = D.bold (fromMaybe D.empty $ getField "title" meta)
     subtitle = fromMaybe D.empty $ getField "subtitle" meta
@@ -155,15 +169,20 @@ blockToANSI opts (Header level (_, classes, kvs) inlines) = do
 -- Doc Text.
 blockToANSI opts (CodeBlock attr str) = do
   table <- gets stInTable
-  inner <- case (table, writerHighlightStyle opts) of
-    (_, Nothing) -> return $ defaultStyle str
+  let highlightWithStyle s = do
+        let fmt o = formatANSI o s
+            result = highlight (writerSyntaxMap opts) fmt attr str
+        return $ case result of
+          Left _ -> defaultStyle str
+          Right f -> D.literal f
+  inner <- case (table, writerHighlightMethod opts) of
+    (_, NoHighlighting) -> return $ defaultStyle str
     (True, _) -> return $ defaultStyle str
-    (False, Just s) -> do
-      let fmt o = formatANSI o s
-          result = highlight (writerSyntaxMap opts) fmt attr str
-      return $ case result of
-        Left _ -> defaultStyle str
-        Right f -> D.literal f
+    (False, Skylighting s) -> highlightWithStyle s
+    (False, DefaultHighlighting) -> highlightWithStyle HL.defaultStyle
+    (False, IdiomaticHighlighting) -> do
+      report $ CouldNotHighlight "no idiomatic highlighting in ANSI"
+      return $ defaultStyle str
   return $ nest table inner
   where defaultStyle = (D.fg D.red) . D.literal
         nest False = D.nest 4
@@ -173,7 +192,6 @@ blockToANSI opts (BlockQuote blocks) = do
   contents <- withFewerColumns 2 $ blockListToANSI opts blocks
   return ( D.prefixed "│ " contents $$ D.blankline)
 
--- TODO: Row spans don't work
 blockToANSI opts (Table _ (Caption _ caption) colSpecs (TableHead _ thead) tbody (TableFoot _ tfoot)) = do
   let captionInlines = blocksToInlines caption
   captionMarkup <-
@@ -195,22 +213,40 @@ blockToANSI opts (Table _ (Caption _ caption) colSpecs (TableHead _ thead) tbody
       maxWidth k = claimWidth k
   let widths = map maxWidth inWidths
   let decor = [D.hsep $ map rule widths]
-  head' <- mapM (goRow widths . unRow) thead
-  body' <- mapM (goRow widths . unRow) (unBodies tbody)
-  foot' <- mapM (goRow widths . unRow) tfoot
+  head' <- (makeRows widths . map unRow) thead
+  body' <- (makeRows widths . map unRow) (tableBodiesToRows tbody)
+  foot' <- (makeRows widths . map unRow) tfoot
   modify $ \s -> s{stInTable = wasTable}
   return $ D.vcat (head' <> decor <> body' <> decor <> foot') $+$ captionMarkup
   where
     unRow (Row _ cs) = cs
-    unBody (TableBody _ _ hd bd) = hd <> bd
-    unBodies = concatMap unBody
-    goRow ws cs = do
-      (d, _) <- foldM goCell ([], ws) cs
-      return $ D.hcat $ intersperse (D.vfill " ") $ reverse d
-    goCell (r, ws) (Cell _ aln _ (ColSpan cspan) inner) = do
+    makeRows ws rows = do
+      (docs, _) <- foldM (goRow ws) ([], M.empty) rows
+      return $ reverse docs
+    goRow _ (r, spans) [] =
+      -- Empty rows are not displayed but previous row spans still apply for them.
+      let spans' = M.map decrementPreviousRowSpans spans
+      in  return (r, spans')
+    goRow ws (r, spans) cs = do
+      (d, (nextPos, spans'), _) <- foldM goCell ([], (0, spans), ws) cs
+      let spans'' = decrementTrailingRowSpans nextPos spans' -- Handle previous row spans next to the end of the current row
+      return (D.hcat (intersperse (D.vfill " ") $ reverse d):r, spans'')
+    goCell (r, (colPos, spans), ws) cell@(Cell _ aln (RowSpan rspan) (ColSpan cspan) inner)
+      | Just (ColSpan previousColSpan, spans') <- takePreviousSpansAtColumn colPos spans = do
+          (r', nextPos, ws') <- makeCell r colPos ws AlignDefault previousColSpan []
+          goCell (r', (nextPos, spans'), ws') cell
+      | otherwise = do
+          (r', nextPos, ws') <- makeCell r colPos ws aln cspan inner
+          let spans' = insertCurrentSpansAtColumn colPos spans (RowSpan rspan) (ColSpan cspan)
+          return (r', (nextPos, spans'), ws')
+    decrementPreviousRowSpans spans@(RowSpan rspan, cspan) =
+      if rspan >= 1
+        then (RowSpan rspan - 1, cspan)
+        else spans
+    makeCell r colPos ws aln cspan inner = do
       let (ws', render) = next ws aln cspan
       innerDoc <- blockListToANSI opts inner
-      return ((render innerDoc):r, ws')
+      return ((render innerDoc):r, colPos + cspan, ws')
     tcell AlignLeft    = D.lblock
     tcell AlignRight   = D.rblock
     tcell AlignCenter  = D.cblock

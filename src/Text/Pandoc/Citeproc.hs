@@ -30,7 +30,7 @@ import Text.Pandoc.Error (PandocError(..))
 import Text.Pandoc.Extensions (pandocExtensions)
 import Text.Pandoc.Logging (LogMessage(..))
 import Text.Pandoc.Options (ReaderOptions(..))
-import Text.Pandoc.Shared (stringify, tshow)
+import Text.Pandoc.Shared (stringify, tshow, makeSections)
 import Data.Containers.ListUtils (nubOrd)
 import Text.Pandoc.Walk (query, walk, walkM)
 import Control.Applicative ((<|>))
@@ -295,10 +295,24 @@ getCitations :: Locale
              -> M.Map Text ItemId
              -> Pandoc
              -> [Citeproc.Citation Inlines]
-getCitations locale otherIdsMap = Foldable.toList . query getCitation
+getCitations locale otherIdsMap (Pandoc meta blocks) =
+  Foldable.toList (query getCitation meta <>
+                   foldMap handleBlock (makeSections False Nothing blocks))
  where
+  handleBlock :: Block -> Seq.Seq (Citeproc.Citation Inlines)
+  handleBlock b@(Div (_,cls,_) _)
+    | "section" `elem` cls
+    , "reset-citation-positions" `elem` cls =
+      case Seq.viewl (query getCitation b) of
+        x Seq.:< xs -> addResetTo x Seq.<| xs
+        Seq.EmptyL -> mempty
+  handleBlock b = query getCitation b
+  addResetTo citation = citation{ Citeproc.citationResetPosition = True }
   getCitation (Cite cs _fallback) = Seq.singleton $
     Citeproc.Citation { Citeproc.citationId = Nothing
+                      , Citeproc.citationResetPosition = False
+                      , Citeproc.citationPrefix = Nothing
+                      , Citeproc.citationSuffix = Nothing
                       , Citeproc.citationNoteNumber =
                           case cs of
                             []    -> Nothing
@@ -318,7 +332,7 @@ fromPandocCitations locale otherIdsMap = concatMap go
  where
   locmap = toLocatorMap locale
   go c =
-    let (mblocinfo, suffix) = parseLocator locmap (citationSuffix c)
+    let (mblocinfo, suffix) = parseLocator locmap (Pandoc.citationSuffix c)
         cit = CitationItem
                { citationItemId = fromMaybe
                    (ItemId $ Pandoc.citationId c)
@@ -326,7 +340,7 @@ fromPandocCitations locale otherIdsMap = concatMap go
                , citationItemLabel = locatorLabel <$> mblocinfo
                , citationItemLocator = locatorLoc <$> mblocinfo
                , citationItemType = NormalCite
-               , citationItemPrefix = case citationPrefix c of
+               , citationItemPrefix = case Pandoc.citationPrefix c of
                                         [] -> Nothing
                                         ils -> Just $ B.fromList ils <>
                                                       B.space
@@ -408,14 +422,14 @@ mvPunct moveNotes locale (x : xs)
 mvPunct moveNotes locale (q : s : x@(Cite _ [il]) : ys)
   | isSpacy s
   , isNote il
-  = let spunct = T.takeWhile isPunctuation $ stringify ys
+  = let spunct = T.takeWhile isPunct $ stringify ys
     in  if moveNotes
            then if T.null spunct
                    then q : x : mvPunct moveNotes locale ys
                    else movePunctInsideQuotes locale
                         [q , Str spunct , x] ++ mvPunct moveNotes locale
                         (B.toList
-                          (dropTextWhile isPunctuation (B.fromList ys)))
+                          (dropTextWhile isPunct (B.fromList ys)))
            else q : x : mvPunct moveNotes locale ys
 -- 'x[^1],' -> 'x,[^1]'
 mvPunct moveNotes locale (Cite cs ils@(_:_) : ys)
@@ -423,13 +437,13 @@ mvPunct moveNotes locale (Cite cs ils@(_:_) : ys)
    , startWithPunct ys
    , moveNotes
    = let s = stringify ys
-         spunct = T.takeWhile isPunctuation s
+         spunct = T.takeWhile isPunct s
      in  Cite cs (movePunctInsideQuotes locale $
                     init ils
                     ++ [Str spunct | not (endWithPunct False (init ils))]
                     ++ [last ils]) :
          mvPunct moveNotes locale
-           (B.toList (dropTextWhile isPunctuation (B.fromList ys)))
+           (B.toList (dropTextWhile isPunct (B.fromList ys)))
 mvPunct moveNotes locale (s : x@(Cite _ [il]) : ys)
   | isSpacy s
   , isNote il
@@ -442,13 +456,18 @@ mvPunct moveNotes locale (Cite cs ils : Str "." : ys)
 mvPunct moveNotes locale (x:xs) = x : mvPunct moveNotes locale xs
 mvPunct _ _ [] = []
 
+-- We don't treat an em-dash or en-dash as punctuation here, because we don't
+-- want notes and quotes to move around them.
+isPunct :: Char -> Bool
+isPunct c = isPunctuation c && c /= '\x2014' && c /= '\x2013'
+
 endWithPunct :: Bool -> [Inline] -> Bool
 endWithPunct _ [] = False
 endWithPunct onlyFinal xs@(_:_) =
   case reverse (T.unpack $ stringify xs) of
        []                       -> True
        -- covers .), .", etc.:
-       (d:c:_) | isPunctuation d
+       (d:c:_) | isPunct d
                  && not onlyFinal
                  && isEndPunct c -> True
        (c:_) | isEndPunct c      -> True
@@ -478,7 +497,10 @@ isYesValue _ = False
 
 -- if document contains a Div with id="refs", insert
 -- references as its contents.  Otherwise, insert references
--- at the end of the document in a Div with id="refs"
+-- at the end of the document in a Div with id="refs" or
+-- id=".*__refs" (where .* stands for any string -- this is
+-- because --file-scope will add such a prefix based on the filename,
+-- see #11072.)
 insertRefs :: [(Text,Text)] -> [Text] -> [Block] -> Pandoc -> Pandoc
 insertRefs _ _ [] d = d
 insertRefs refkvs refclasses refs (Pandoc meta bs) =
@@ -503,12 +525,13 @@ insertRefs refkvs refclasses refs (Pandoc meta bs) =
    refDiv = Div ("refs", refclasses, refkvs) refs
    addUnNumbered cs = "unnumbered" : [c | c <- cs, c /= "unnumbered"]
    go :: Block -> State Bool Block
-   go (Div ("refs",cs,kvs) xs) = do
-     put True
-     -- refHeader isn't used if you have an explicit references div
-     let cs' = nubOrd $ cs ++ refclasses
-     let kvs' = nubOrd $ kvs ++ refkvs
-     return $ Div ("refs",cs',kvs') (xs ++ refs)
+   go (Div (ident,cs,kvs) xs)
+     | ident == "refs" || "__refs" `T.isSuffixOf` ident = do
+       put True
+       -- refHeader isn't used if you have an explicit references div
+       let cs' = nubOrd $ cs ++ refclasses
+       let kvs' = nubOrd $ kvs ++ refkvs
+       return $ Div (ident,cs',kvs') (xs ++ refs)
    go x = return x
 
 refTitle :: Meta -> Maybe [Inline]
@@ -569,7 +592,8 @@ deNote (Note bs) =
       = Cite (c:cs) (addCommas (needsPeriod zs) ils) :
         addParens zs
     | otherwise
-      = Cite (c:cs) (concatMap noteInParens ils) : addParens zs
+      = Cite (c:cs) (dropWhile (== Space) (concatMap noteInParens ils))
+         : addParens zs
   addParens (x:xs) = x : addParens xs
 
   removeNotes (Span ("",["csl-note"],[]) ils) = Span ("",[],[]) ils

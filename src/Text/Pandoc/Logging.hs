@@ -105,12 +105,14 @@ data LogMessage =
   | UnclosedDiv SourcePos SourcePos
   | UnsupportedCodePage Int
   | YamlWarning SourcePos Text
+  | UnsupportedPdfStandard Text
   deriving (Show, Eq, Data, Ord, Typeable, Generic)
 
 instance ToJSON LogMessage where
   toJSON x = object $
     "verbosity" .= toJSON (messageVerbosity x) :
     "type" .= toJSON (show $ toConstr x) :
+    "pretty" .= toJSON (showLogMessage x) :
     case x of
       SkippedContent s pos ->
            ["contents" .= s,
@@ -290,6 +292,8 @@ instance ToJSON LogMessage where
            , "column" .= toJSON (sourceColumn pos)
            , "message" .= msg
            ]
+      UnsupportedPdfStandard s ->
+           ["contents" .= s]
 
 showPos :: SourcePos -> Text
 showPos pos = Text.pack $ sn ++ "line " ++
@@ -377,8 +381,7 @@ showLogMessage msg =
        NoTitleElement fallback ->
          "This document format requires a nonempty <title> element.\n" <>
          "Defaulting to '" <> fallback <> "' as the title.\n" <>
-         "To specify a title, use 'title' in metadata or " <>
-         "--metadata title=\"...\"."
+         "To specify a title, use --variable pagetitle=\"...\"."
        NoLangSpecified ->
          "No value for 'lang' was specified in the metadata.\n" <>
          "It is recommended that lang be specified for this format."
@@ -438,6 +441,8 @@ showLogMessage msg =
        UnsupportedCodePage cpg -> "Unsupported code page " <> tshow cpg <>
           ". Text will likely be garbled."
        YamlWarning pos m -> "YAML warning (" <> showPos pos <> "): " <> m
+       UnsupportedPdfStandard s ->
+         "PDF standard '" <> s <> "' is not supported by LaTeX and will be ignored."
 
 messageVerbosity :: LogMessage -> Verbosity
 messageVerbosity msg =
@@ -497,3 +502,4 @@ messageVerbosity msg =
        UnclosedDiv{}                 -> WARNING
        UnsupportedCodePage{}         -> WARNING
        YamlWarning{}                 -> WARNING
+       UnsupportedPdfStandard{}      -> WARNING

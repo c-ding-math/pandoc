@@ -35,7 +35,8 @@ import Control.Monad.State.Strict
 import Control.Monad ( liftM, when, foldM, unless )
 import Control.Monad.Trans ( MonadTrans(lift) )
 import Data.Char (ord, isSpace, isAscii)
-import Data.List (intercalate, intersperse, partition, delete, (\\), foldl')
+import Data.List (intercalate, intersperse, partition, delete, (\\))
+import qualified Data.List as L
 import Data.List.NonEmpty (NonEmpty((:|)))
 import Data.Containers.ListUtils (nubOrd)
 import Data.Maybe (fromMaybe, isJust, isNothing)
@@ -48,12 +49,12 @@ import Text.Pandoc.URI (urlEncode)
 import Numeric (showHex)
 import Text.DocLayout (render, literal, Doc)
 import Text.Blaze.Internal (MarkupM (Empty), customLeaf, customParent)
-import Text.DocTemplates (FromContext (lookupContext), Context (..))
+import Text.DocTemplates (FromContext (lookupContext), Context (..), Val(..))
 import qualified Text.DocTemplates.Internal as DT
 import Text.Blaze.Html hiding (contents)
 import Text.Pandoc.Definition
 import Text.Pandoc.Highlighting (formatHtmlBlock, formatHtml4Block,
-                 formatHtmlInline, highlight, styleToCss)
+                 formatHtmlInline, highlight, styleToCss, defaultStyle)
 import Text.Pandoc.ImageSize
 import Text.Pandoc.Options
 import Text.Pandoc.Shared
@@ -125,7 +126,7 @@ defaultWriterState = WriterState {stNotes= [],
 strToHtml :: Text -> Html
 strToHtml t
     | T.any isSpecial t =
-       let !x = foldl' go mempty $ T.groupBy samegroup t
+       let !x = L.foldl' go mempty $ T.groupBy samegroup t
         in x
     | otherwise = toHtml t
   where
@@ -317,7 +318,8 @@ pandocToHtml opts (Pandoc meta blocks) = do
         MathJax url
           | slideVariant /= RevealJsSlides ->
           -- mathjax is handled via a special plugin in revealjs
-            H.script ! A.src (toValue $ toURI html5 url)
+            H.script ! A.defer mempty
+                    ! A.src (toValue $ toURI html5 url)
                     ! A.type_ "text/javascript"
                     $ case slideVariant of
                             SlideousSlides ->
@@ -356,10 +358,14 @@ pandocToHtml opts (Pandoc meta blocks) = do
   let mCss :: Maybe [Text] = lookupContext "css" metadata
   let context :: Context Text
       context =   (if stHighlighting st
-                      then case writerHighlightStyle opts of
-                                Just sty -> defField "highlighting-css"
-                                            (literal $ T.pack $ styleToCss sty)
-                                Nothing  -> id
+                      then case writerHighlightMethod opts of
+                             Skylighting sty ->
+                               defField "highlighting-css"
+                                 (literal $ T.pack $ styleToCss sty)
+                             DefaultHighlighting ->
+                               defField "highlighting-css"
+                                 (literal $ T.pack $ styleToCss defaultStyle)
+                             _  -> id
                       else id) .
                   (if stCsl st
                       then defField "csl-css" True .
@@ -427,7 +433,21 @@ pandocToHtml opts (Pandoc meta blocks) = do
                          defField "transitionSpeed" ("default" :: Doc Text) .
                          defField "backgroundTransition" ("fade" :: Doc Text) .
                          defField "viewDistance" ("3" :: Doc Text) .
-                         defField "mobileViewDistance" ("2" :: Doc Text)
+                         defField "mobileViewDistance" ("2" :: Doc Text) .
+                         (case (lookupContext "scrollProgress" metadata
+                                   :: Maybe (Val Text)) of
+                            Just (BoolVal False) -> id
+                            Just (BoolVal True) -> defField "scrollProgress" True
+                            _  -> defField "scrollProgressAuto" True) .
+                         defField "scrollActivationWidth" ("0" :: Doc Text) .
+                         defField "scrollSnap" ("mandatory" :: Doc Text) .
+                         defField "scrollLayout" ("full" :: Doc Text) .
+                         (case writerHighlightMethod opts of
+                            IdiomaticHighlighting
+                             | slideVariant == RevealJsSlides ->
+                              defField "highlight-js" True .
+                              defField "highlightjs-theme" ("monokai" :: Doc Text)
+                            _ -> id)
                       else id) .
                   defField "document-css" (isNothing mCss && slideVariant == NoSlides) .
                   defField "quotes" (stQuotes st) .
@@ -665,7 +685,7 @@ tagWithAttributes opts html5 selfClosing tagname attr =
 
 addAttrs :: PandocMonad m
          => WriterOptions -> Attr -> Html -> StateT WriterState m Html
-addAttrs opts attr h = foldl' (!) h <$> attrsToHtml opts attr
+addAttrs opts attr h = L.foldl' (!) h <$> attrsToHtml opts attr
 
 toAttrs :: PandocMonad m
         => [(Text, Text)] -> StateT WriterState m [Attribute]
@@ -785,8 +805,8 @@ blockToHtmlInner opts (Div (ident, "section":dclasses, dkvs)
         if titleSlide
            -- title slides have no content of their own
            then let (as, bs) = break isSec xs
-                in  (breakOnPauses as, bs)
-           else ([], breakOnPauses xs)
+                in  (walk breakOnPauses as, bs)
+           else ([], walk breakOnPauses xs)
   let secttag  = if html5
                     then H5.section
                     else H.div
@@ -845,6 +865,11 @@ blockToHtmlInner opts (Div (ident, "section":dclasses, dkvs)
                      if null innerSecs
                         then mempty
                         else nl <> innerContents
+blockToHtmlInner opts (Div (ident, classes, kvs) [b])
+  | Just "1" <- lookup "wrapper" kvs
+    -- unwrap "wrapper" div, putting attr on child
+  = blockToHtmlInner opts b >>=
+      addAttrs opts (ident, classes, [(k,v) | (k,v) <- kvs, k /= "wrapper"])
 blockToHtmlInner opts (Div attr@(ident, classes, kvs') bs) = do
   html5 <- gets stHtml5
   slideVariant <- gets stSlideVariant
@@ -926,6 +951,7 @@ blockToHtmlInner _ HorizontalRule = do
   return $ if html5 then H5.hr else H.hr
 blockToHtmlInner opts (CodeBlock (id',classes,keyvals) rawCode) = do
   html5 <- gets stHtml5
+  slideVariant <- gets stSlideVariant
   id'' <- if T.null id'
              then do
                modify $ \st -> st{ stCodeBlockNum = stCodeBlockNum st + 1 }
@@ -943,21 +969,37 @@ blockToHtmlInner opts (CodeBlock (id',classes,keyvals) rawCode) = do
       adjCode  = if tolhs
                     then T.unlines . map ("> " <>) . T.lines $ rawCode
                     else rawCode
-      hlCode   = if isJust (writerHighlightStyle opts)
-                    then highlight (writerSyntaxMap opts)
-                         (if html5 then formatHtmlBlock else formatHtml4Block)
-                            (id'',classes',keyvals) adjCode
-                    else Left ""
-  case hlCode of
-         Left msg -> do
-           unless (T.null msg) $
-             report $ CouldNotHighlight msg
-           addAttrs opts (id',classes,keyvals)
-             $ H.pre $ H.code $ toHtml adjCode
-         Right h -> modify (\st -> st{ stHighlighting = True }) >>
-                    -- we set writerIdentifierPrefix to "" since id'' already
-                    -- includes it:
-                    addAttrs opts{writerIdentifierPrefix = ""} (id'',[],keyvals) h
+      isIdiomaticRevealJs = slideVariant == RevealJsSlides &&
+                            writerHighlightMethod opts == IdiomaticHighlighting
+  if isIdiomaticRevealJs
+     then do
+       -- For idiomatic reveal.js highlighting, put attributes on <code>
+       -- with language- prefix, and let highlight.js do the highlighting.
+       modify (\st -> st{ stHighlighting = True })
+       let (langClasses, otherClasses) = case classes' of
+             (lang:rest) -> (["language-" <> lang], rest)
+             []          -> ([], [])
+           codeAttrs = (id', langClasses ++ otherClasses, keyvals)
+       codeTag <- addAttrs opts codeAttrs $ H.code $ toHtml adjCode
+       return $ H.pre codeTag
+     else do
+       let highlighted = highlight (writerSyntaxMap opts)
+                           (if html5 then formatHtmlBlock else formatHtml4Block)
+                           (id'',classes',keyvals) adjCode
+           hlCode   = case writerHighlightMethod opts of
+                        Skylighting _ -> highlighted
+                        DefaultHighlighting -> highlighted
+                        _ -> Left ""
+       case hlCode of
+              Left msg -> do
+                unless (T.null msg) $
+                  report $ CouldNotHighlight msg
+                addAttrs opts (id',classes,keyvals)
+                  $ H.pre $ H.code $ toHtml adjCode
+              Right h -> modify (\st -> st{ stHighlighting = True }) >>
+                         -- we set writerIdentifierPrefix to "" since id'' already
+                         -- includes it:
+                         addAttrs opts{writerIdentifierPrefix = ""} (id'',[],keyvals) h
 blockToHtmlInner opts (BlockQuote blocks) = do
   -- in S5, treat list in blockquote specially
   -- if default is incremental, make it nonincremental;
@@ -1030,7 +1072,7 @@ blockToHtmlInner opts (OrderedList (startnum, numstyle, _) lst) = do
                                    numstyle']
                    else [])
   l <- ordList opts contents
-  return $ foldl' (!) l attribs
+  return $ L.foldl' (!) l attribs
 blockToHtmlInner opts (DefinitionList lst) = do
   contents <- mapM (\(term, defs) ->
                   do term' <- liftM H.dt $ inlineListToHtml opts term
@@ -1397,7 +1439,7 @@ inlineToHtml opts inline = do
                                = Just (t . H.u, cs)
                              | otherwise
                                = Just (t, c:cs)
-                            spanLikeTags = foldl' go Nothing
+                            spanLikeTags = L.foldl' go Nothing
                         in case spanLikeTags classes of
                             Just (tag, cs) -> do
                               h <- inlineListToHtml opts ils
@@ -1437,11 +1479,12 @@ inlineToHtml opts inline = do
                                modify $ \st -> st{ stHighlighting = True }
                                addAttrs opts (ids,[],kvs) $
                                  fromMaybe id sampOrVar h
-                        where hlCode = if isJust (writerHighlightStyle opts)
-                                          then highlight
-                                                 (writerSyntaxMap opts)
-                                                 formatHtmlInline attr str
-                                          else Left ""
+                        where hlCode = case writerHighlightMethod opts of
+                                          Skylighting _ -> highlighted
+                                          DefaultHighlighting -> highlighted
+                                          _ -> Left ""
+                              highlighted =  highlight (writerSyntaxMap opts)
+                                                       formatHtmlInline attr str
                               (sampOrVar,cs')
                                 | "sample" `elem` cs =
                                       (Just H.samp,"sample" `delete` cs)
@@ -1536,6 +1579,9 @@ inlineToHtml opts inline = do
              _ -> do report $ InlineNotRendered inline
                      return mempty
     (Link attr txt (s,_)) | "mailto:" `T.isPrefixOf` s -> do
+                        -- We need to remove links from link text, because an
+                        -- <a> element is not allowed inside another <a>
+                        -- element.
                         linkText <- inlineListToHtml opts (removeLinks txt)
                         obfuscateLink opts attr linkText s
     (Link (ident,classes,kvs) txt (s,tit)) -> do
@@ -1590,7 +1636,7 @@ inlineToHtml opts inline = do
                               Just "audio" -> mediaTag H5.audio "Audio"
                               Just _       -> (H5.embed, [])
                               _            -> imageTag
-                        return $ foldl' (!) tag $ attributes ++ specAttrs
+                        return $ L.foldl' (!) tag $ attributes ++ specAttrs
                         -- note:  null title included, as in Markdown.pl
     (Note contents) -> do
                         notes <- gets stNotes
@@ -1668,14 +1714,16 @@ blockListToNote opts ref blocks = do
       let kvs = [("role","doc-backlink") | html5]
       let backlink = Link ("",["footnote-back"],kvs)
                         [Str ref] ("#" <> "fnref" <> ref,"")
-      let blocks' =
-           case blocks of
-             (Para ils : rest) ->
-                Para (backlink : Str "." : Space : ils) : rest
-             (Plain ils : rest) ->
-                Plain (backlink : Str "." : Space : ils) : rest
-             _ -> Para [backlink , Str "."] : blocks
-      contents <- blockListToHtml opts blocks'
+      let addBacklinkInlines bs
+             | epubv == EPUB3 = bs
+             | otherwise =
+                 case bs of
+                   (Para ils : rest) ->
+                     Para (backlink : Str "." : Space : ils) : rest
+                   (Plain ils : rest) ->
+                     Plain (backlink : Str "." : Space : ils) : rest
+                   _ -> Para [backlink , Str "."] : blocks
+      contents <- blockListToHtml opts (addBacklinkInlines blocks)
       let noteItem = (if epubv == EPUB3
                          then H5.aside ! customAttribute "epub:type" "footnote" ! customAttribute "role" "doc-footnote"
                          else H.div) ! prefixedId opts ("fn" <> ref)
@@ -1755,15 +1803,6 @@ isRawHtml f = do
 isSlideVariant :: Format -> Bool
 isSlideVariant f = f `elem` [Format "s5", Format "slidy", Format "slideous",
                              Format "dzslides", Format "revealjs"]
-
-
--- We need to remove links from link text, because an <a> element is
--- not allowed inside another <a> element.
-removeLinks :: [Inline] -> [Inline]
-removeLinks = walk go
- where
-  go (Link attr ils _) = Span attr ils
-  go x = x
 
 toURI :: Bool -> Text -> Text
 toURI isHtml5 t = if isHtml5 then t else escapeURI t

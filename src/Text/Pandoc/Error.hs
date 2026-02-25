@@ -25,7 +25,6 @@ import Data.Word (Word8)
 import Data.Text (Text)
 import qualified Data.Text as T
 import GHC.Generics (Generic)
-import Network.HTTP.Client (HttpException)
 import System.Exit (ExitCode (..), exitWith)
 import System.IO (stderr)
 import qualified Text.Pandoc.UTF8 as UTF8
@@ -34,7 +33,7 @@ import Text.Pandoc.Shared (tshow)
 import Citeproc (CiteprocError, prettyCiteprocError)
 
 data PandocError = PandocIOError Text IOError
-                 | PandocHttpError Text HttpException
+                 | PandocHttpError Text Text
                  | PandocShouldNeverHappenError Text
                  | PandocSomeError Text
                  | PandocParseError Text
@@ -65,16 +64,18 @@ data PandocError = PandocIOError Text IOError
                  | PandocUnsupportedExtensionError Text Text
                  | PandocCiteprocError CiteprocError
                  | PandocBibliographyError Text Text
+                 | PandocInputNotTextError Text
                  deriving (Show, Typeable, Generic)
 
 instance Exception PandocError
+ where
+   displayException = T.unpack . renderError
 
 renderError :: PandocError -> Text
 renderError e =
   case e of
     PandocIOError _ err' -> T.pack $ displayException err'
-    PandocHttpError u err' ->
-      "Could not fetch " <> u <> "\n" <> tshow err'
+    PandocHttpError u err' -> "Could not fetch " <> u <> "\n" <> err'
     PandocShouldNeverHappenError s ->
       "Something we thought was impossible happened!\n" <>
       "Please report this to pandoc's developers: " <> s
@@ -124,7 +125,6 @@ renderError e =
                  "\nTry using Word to save your DOC file as DOCX," <>
                  " and convert that with pandoc."
         "pdf" -> "\nPandoc can convert to PDF, but not from PDF."
-        "asciidoc" -> "\nPandoc can convert to asciidoc, but not from asciidoc."
         _     -> ""
     PandocUnknownWriterError w ->
        "Unknown output format " <> w <>
@@ -143,6 +143,13 @@ renderError e =
       prettyCiteprocError e'
     PandocBibliographyError fp msg ->
       "Error reading bibliography file " <> fp <> ":\n" <> msg
+    PandocInputNotTextError fp ->
+      "Expected text as an input, but received binary data from " <>
+      (if T.null fp
+        then "stdin"
+        else "file " <> fp) <>
+      ".\nIf you intended to convert from binary format, verify that it's " <>
+      "supported and use\nexplicit -f FORMAT."
 
 
 -- | Handle PandocError by exiting with an error message.
@@ -184,6 +191,7 @@ handleError (Left e) =
       PandocUTF8DecodingError{} -> 92
       PandocIpynbDecodingError{} -> 93
       PandocUnsupportedCharsetError{} -> 94
+      PandocInputNotTextError{} -> 95
       PandocCouldNotFindDataFileError{} -> 97
       PandocCouldNotFindMetadataFileError{} -> 98
       PandocResourceNotFound{} -> 99

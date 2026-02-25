@@ -176,11 +176,6 @@ runPres :: WriterEnv -> WriterState -> Pres a -> (a, [LogMessage])
 runPres env st p = (pres, reverse $ stLog finalSt)
   where (pres, finalSt) = runState (runReaderT p env) st
 
--- GHC 7.8 will still complain about concat <$> mapM unless we specify
--- Functor. We can get rid of this when we stop supporting GHC 7.8.
-concatMapM        :: (Monad m) => (a -> m [b]) -> [a] -> m [b]
-concatMapM f xs   =  liftM concat (mapM f xs)
-
 type Pixels = Integer
 
 data Presentation = Presentation DocProps [Slide]
@@ -348,7 +343,7 @@ instance Default PicProps where
 --------------------------------------------------
 
 inlinesToParElems :: [Inline] -> Pres [ParaElem]
-inlinesToParElems = concatMapM inlineToParElems
+inlinesToParElems = fmap mconcat . mapM inlineToParElems
 
 inlineToParElems :: Inline -> Pres [ParaElem]
 inlineToParElems (Str s) = do
@@ -460,15 +455,17 @@ blockToParagraphs (CodeBlock attr str) = do
                                     , pPropIndent = Just 0
                                     }
                 , envRunProps = (envRunProps r){rPropCode = True}}) $ do
-    mbSty <- writerHighlightStyle <$> asks envOpts
+    highlightOpt <- writerHighlightMethod <$> asks envOpts
     synMap <- writerSyntaxMap <$> asks envOpts
-    case mbSty of
-      Just sty ->
-        case highlight synMap (formatSourceLines sty) attr str of
-          Right pElems -> do pPropsNew <- asks envParaProps
-                             return [Paragraph pPropsNew pElems]
-          Left _ -> blockToParagraphs $ Para [Str str]
-      Nothing -> blockToParagraphs $ Para [Str str]
+    let highlightWithStyle style = do
+          case highlight synMap (formatSourceLines style) attr str of
+            Right pElems -> do pPropsNew <- asks envParaProps
+                               return [Paragraph pPropsNew pElems]
+            Left _ -> blockToParagraphs $ Para [Str str]
+    case highlightOpt of
+      Skylighting sty -> highlightWithStyle sty
+      DefaultHighlighting -> highlightWithStyle defaultStyle
+      _ -> blockToParagraphs $ Para [Str str]
 -- We can't yet do incremental lists, but we should render a
 -- (BlockQuote List) as a list to maintain compatibility with other
 -- formats.
@@ -482,7 +479,7 @@ blockToParagraphs (BlockQuote blks) =
                                                  , pPropIndent = Just 0
                                                  }
                 , envRunProps = (envRunProps r){rPropForceSize = Just blockQuoteSize}})$
-  concatMapM blockToParagraphs blks
+  mconcat <$> mapM blockToParagraphs blks
 -- TODO: work out the format
 blockToParagraphs blk@(RawBlock _ _) = do addLogMessage $ BlockNotRendered blk
                                           return []
@@ -506,7 +503,7 @@ blockToParagraphs (BulletList blksLst) = do
                                            , pPropIndent = Nothing
                                            , pPropIncremental = incremental
                                            }}) $
-    concatMapM multiParList blksLst
+    mconcat <$> mapM multiParList blksLst
 blockToParagraphs (OrderedList listAttr blksLst) = do
   pProps <- asks envParaProps
   incremental <- listShouldBeIncremental
@@ -516,7 +513,7 @@ blockToParagraphs (OrderedList listAttr blksLst) = do
                                            , pPropIndent = Nothing
                                            , pPropIncremental = incremental
                                            }}) $
-    concatMapM multiParList blksLst
+    mconcat <$> mapM multiParList blksLst
 blockToParagraphs (DefinitionList entries) = do
   incremental <- listShouldBeIncremental
   let go :: ([Inline], [[Block]]) -> Pres [Paragraph]
@@ -524,11 +521,12 @@ blockToParagraphs (DefinitionList entries) = do
         term <-blockToParagraphs $ Para [Strong ils]
         -- For now, we'll treat each definition term as a
         -- blockquote. We can extend this further later.
-        definition <- concatMapM (blockToParagraphs . BlockQuote) blksLst
+        definition <-
+          mconcat <$> mapM (blockToParagraphs . BlockQuote) blksLst
         return $ term ++ definition
   local (\env -> env {envParaProps =
                        (envParaProps env) {pPropIncremental = incremental}})
-    $ concatMapM go entries
+    $ mconcat <$> mapM go entries
 blockToParagraphs (Div (_, classes, _) blks) = let
   hasIncremental = "incremental" `elem` classes
   hasNonIncremental = "nonincremental" `elem` classes
@@ -536,7 +534,7 @@ blockToParagraphs (Div (_, classes, _) blks) = let
                    | hasNonIncremental -> Just InNonIncremental
                    | otherwise -> Nothing
   addIncremental env = env { envInIncrementalDiv = incremental }
-  in local addIncremental (concatMapM blockToParagraphs blks)
+  in local addIncremental (mconcat <$> mapM blockToParagraphs blks)
 blockToParagraphs (Figure attr capt blks) = -- This never seems to be used:
   blockToParagraphs (Shared.figureDiv attr capt blks)
 blockToParagraphs hr@HorizontalRule = notRendered hr
@@ -561,7 +559,7 @@ multiParList (b:bs) = do
                   , pPropLevel = level + 1
                   }
                 })
-        $ concatMapM blockToParagraphs bs
+        $ mconcat <$> mapM blockToParagraphs bs
   return $ p ++ ps
 
 cellToParagraphs :: Alignment -> SimpleCell -> Pres [Paragraph]
@@ -725,6 +723,7 @@ bodyBlocksToSlide _ (blk : blks) spkNotes
   , "columns" `elem` classes
   , Div (_, clsL, _) blksL : Div (_, clsR, _) blksR : remaining <- divBlks
   , "column" `elem` clsL, "column" `elem` clsR = do
+      -- At least 2 column elements
       mapM_ (addLogMessage . BlockNotRendered) (blks ++ remaining)
       let mkTwoColumn left right = do
             blksL' <- join . take 1 <$> splitBlocks left
@@ -753,6 +752,16 @@ bodyBlocksToSlide _ (blk : blks) spkNotes
       if (any null [blksL1, blksL2]) && (any null [blksR1, blksR2])
       then mkTwoColumn blksL blksR
       else mkComparison blksL1 blksL2 blksR1 blksR2
+  | Div (_, classes, _) divBlks <- blk
+  , "columns" `elem` classes
+  , Div (_, cls, _) columnBlks : remaining <- divBlks
+  , "column" `elem` cls = do
+      -- Only 1 column element.
+      mapM_ (addLogMessage . BlockNotRendered) (blks ++ remaining)
+      clBlks' <- join . take 1 <$> splitBlocks columnBlks
+      shapes <- blocksToShapes clBlks'
+      sldId <- asks envCurSlideId
+      return $ Slide sldId (ContentSlide [] shapes) spkNotes Nothing
 bodyBlocksToSlide _ (blk : blks) spkNotes = do
       sldId <- asks envCurSlideId
       inNoteSlide <- asks envInNoteSlide
@@ -811,7 +820,7 @@ blocksToSlide' lvl blks spkNotes = bodyBlocksToSlide lvl blks spkNotes
 blockToSpeakerNotes :: Block -> Pres SpeakerNotes
 blockToSpeakerNotes (Div (_, ["notes"], _) blks) =
   local (\env -> env{envInSpeakerNotes=True}) $
-  SpeakerNotes <$> concatMapM blockToParagraphs blks
+  SpeakerNotes . mconcat <$> mapM blockToParagraphs blks
 blockToSpeakerNotes _ = return mempty
 
 handleSpeakerNotes :: Block -> Pres ()
@@ -878,6 +887,12 @@ getMetaSlide  = do
   subtitle <- inlinesToParElems $ lookupMetaInlines "subtitle" meta
   authors <- mapM inlinesToParElems $ docAuthors meta
   date <- inlinesToParElems $ docDate meta
+  -- Get speaker notes from metadata "notes" field
+  let notesBlocks = lookupMetaBlocks "notes" meta
+  speakerNotes <- if null notesBlocks
+                  then return mempty
+                  else local (\env -> env{envInSpeakerNotes=True}) $
+                       SpeakerNotes . mconcat <$> mapM blockToParagraphs notesBlocks
   if null title && null subtitle && null authors && null date
     then return Nothing
     else return $
@@ -885,7 +900,7 @@ getMetaSlide  = do
          Slide
          metadataSlideId
          (MetadataSlide title subtitle authors date)
-         mempty
+         speakerNotes
          Nothing
 
 addSpeakerNotesToMetaSlide :: Slide -> [Block] -> Pres (Slide, [Block])

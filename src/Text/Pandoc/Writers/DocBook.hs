@@ -17,7 +17,7 @@ import Control.Monad.Reader
 import Data.Generics (everywhere, mkT)
 import Data.List (nub, partition)
 import Data.Maybe (isNothing)
-import Data.Monoid (All (..), Any (..))
+import Data.Monoid (All (..))
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Text.Pandoc.Builder as B
@@ -265,7 +265,7 @@ blockToDocBook opts (BulletList lst) = do
   let attribs = [("spacing", "compact") | isTightList lst]
   inTags True "itemizedlist" attribs <$> listItemsToDocBook opts lst
 blockToDocBook _ (OrderedList _ []) = return empty
-blockToDocBook opts (OrderedList (start, numstyle, _) (first:rest)) = do
+blockToDocBook opts (OrderedList (start, numstyle, _) items) = do
   let numeration = case numstyle of
                        DefaultStyle -> []
                        Decimal      -> [("numeration", "arabic")]
@@ -274,17 +274,10 @@ blockToDocBook opts (OrderedList (start, numstyle, _) (first:rest)) = do
                        LowerAlpha   -> [("numeration", "loweralpha")]
                        UpperRoman   -> [("numeration", "upperroman")]
                        LowerRoman   -> [("numeration", "lowerroman")]
-      spacing    = [("spacing", "compact") | isTightList (first:rest)]
-      attribs    = numeration <> spacing
-  items <- if start == 1
-              then listItemsToDocBook opts (first:rest)
-              else do
-                first' <- blocksToDocBook opts (map plainToPara first)
-                rest' <- listItemsToDocBook opts rest
-                return $
-                  inTags True "listitem" [("override",tshow start)] first' $$
-                   rest'
-  return $ inTags True "orderedlist" attribs items
+      spacing    = [("spacing", "compact") | isTightList items]
+      startnum   = [("startingnumber", tshow start) | start /= 1]
+      attribs    = numeration <> spacing <> startnum
+  inTags True "orderedlist" attribs <$> listItemsToDocBook opts items
 blockToDocBook opts (DefinitionList lst) = do
   let attribs = [("spacing", "compact") | isTightList $ concatMap snd lst]
   inTags True "variablelist" attribs <$> deflistItemsToDocBook opts lst
@@ -350,16 +343,6 @@ blockToDocBook opts (Figure attr capt@(Caption _ caption) body) = do
         else inTagsIndented "figure" $
              inTagsSimple "title" title $$
              mconcat mediaobjects
-
-hasLineBreaks :: [Inline] -> Bool
-hasLineBreaks = getAny . query isLineBreak . walk removeNote
-  where
-    removeNote :: Inline -> Inline
-    removeNote (Note _) = Str ""
-    removeNote x        = x
-    isLineBreak :: Inline -> Any
-    isLineBreak LineBreak = Any True
-    isLineBreak _         = Any False
 
 alignmentToString :: Alignment -> Text
 alignmentToString alignment = case alignment of

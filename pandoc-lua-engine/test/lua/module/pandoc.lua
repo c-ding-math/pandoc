@@ -164,6 +164,13 @@ return {
       assert.are_same(meta.test, {pandoc.Plain{pandoc.Str 'check'}})
     end),
   },
+  group 'Pandoc' {
+    test('normalize', function ()
+      local doc = pandoc.Pandoc({{'a', pandoc.Space(), pandoc.Space(), 'b'}})
+      local normalized = pandoc.Pandoc({{'a', pandoc.Space(), 'b'}})
+      assert.are_equal(normalized, doc:normalize())
+    end),
+  },
   group 'Other types' {
     group 'ReaderOptions' {
       test('returns a userdata value', function ()
@@ -453,6 +460,48 @@ return {
         function () pandoc.write(doc, format_spec) end,
         'The extension nope is not supported for plain'
       )
+    end),
+  },
+
+  group 'with_state' {
+    test('request_headers can be modified', function ()
+      local headers = {
+        {"Authorization", "Basic my-secret"}
+      }
+      pandoc.with_state({request_headers = headers}, function ()
+        assert.are_same(PANDOC_STATE.request_headers, headers)
+      end)
+    end),
+    test('resource_path can be modified', function ()
+      local paths = {'.', '/test/resource/path' }
+      pandoc.with_state({resource_path = paths}, function ()
+        assert.are_same(PANDOC_STATE.resource_path, paths)
+      end)
+    end),
+    test('user_data_dir can be modified', function ()
+      local opts = {user_data_dir = '/my/test/path'}
+      pandoc.with_state(opts, function ()
+        assert.are_equal(PANDOC_STATE.user_data_dir, '/my/test/path')
+      end)
+    end),
+    test('original value is restored afterwards', function ()
+      local orig_user_data_dir = PANDOC_STATE.user_data_dir
+      local opts = {user_data_dir = '/my/test/path'}
+      pandoc.with_state(opts, function () end)
+      assert.are_equal(PANDOC_STATE.user_data_dir, orig_user_data_dir)
+    end),
+    test('unsupported options trigger an error', function ()
+      local orig_log = PANDOC_STATE.log
+      local opts = {log = 'nonsense'}
+      assert.error_matches(
+        function ()
+          pandoc.with_state(opts, function ()
+            assert.are_same(PANDOC_STATE.log, orig_log)
+          end)
+        end,
+        "Unknown or unsupported"
+      )
+      assert.are_same(PANDOC_STATE.log, orig_log)
     end),
   },
 

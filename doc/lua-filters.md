@@ -92,13 +92,20 @@ applies all filters (including JSON filters specified via
 `--filter` and Lua filters specified via `--lua-filter`) in the
 order they appear on the command line.
 
-Pandoc expects each Lua file to return a list of filters. The
-filters in that list are called sequentially, each on the result
-of the previous filter. If there is no value returned by the
-filter script, then pandoc will try to generate a single filter
-by collecting all top-level functions whose names correspond to
-those of pandoc elements (e.g., `Str`, `Para`, `Meta`, or
-`Pandoc`). (That is why the two examples above are equivalent.)
+Pandoc expects each Lua file to return a filter. If there is
+no value returned by the filter script, then pandoc will try to
+generate a single filter by collecting all top-level functions
+whose names correspond to those of pandoc elements (e.g., `Str`,
+`Para`, `Meta`, or `Pandoc`). (That is why the two examples above
+are equivalent.)
+
+It is currently also possible to return a list of filters
+from a Lua file which are called sequentially. Before the
+[walk](#type-pandoc:walk) method was made available, this was
+the only way to run multiple filters from one Lua file. However,
+returning a list of filters is now discouraged in favor of using
+the [walk](#type-pandoc:walk) method, and this functionality may
+be removed at some point.
 
 For each filter, the document is traversed and each element
 subjected to the filter. Elements for which the filter contains
@@ -203,23 +210,17 @@ fixed order, skipping any which are not present:
   3. the [`Meta`](#type-meta) filter function, and last
   4. the [`Pandoc`](#type-pandoc) filter function.
 
-It is still possible to force a different order by explicitly
-returning multiple filter sets. For example, if the filter for
-*Meta* is to be run before that for *Str*, one can write
+It is still possible to force a different order by manually
+running the filters using the [walk](#type-pandoc:walk) method.
+For example, if the filter for *Meta* is to be run before that
+for *Str*, one can write
 
 ``` lua
--- ... filter definitions ...
-
-return {
-  { Meta = Meta },  -- (1)
-  { Str = Str }     -- (2)
-}
+function Pandoc(doc)
+  doc = doc:walk { Meta = Meta } -- (1)
+  return doc:walk { Str = Str }  -- (2)
+end
 ```
-
-Filter sets are applied in the order in which they are returned.
-All functions in set (1) are thus run before those in (2),
-causing the filter function for *Meta* to be run before the
-filtering of *Str* elements is started.
 
 ### Topdown traversal
 
@@ -318,20 +319,12 @@ variables.
     unless it has been configured by the package maintainer to
     rely on a system-wide installation.
 
-    Note that the result of `require 'lpeg'` is not necessarily
-    equal to this value; the `require` mechanism prefers the
-    system's lpeg library over the built-in version.
-
 `re`
 :   Contains the LPeg.re module, which is built on top of LPeg
     and offers an implementation of a [regex engine].  Pandoc
     uses a built-in version of the library, unless it has been
     configured by the package maintainer to rely on a system-wide
     installation.
-
-    Note that the result of `require 're` is not necessarily
-    equal to this value; the `require` mechanism prefers the
-    system's lpeg library over the built-in version.
 
 [LPeg homepage]: http://www.inf.puc-rio.br/~roberto/lpeg/
 [regex engine]: http://www.inf.puc-rio.br/~roberto/lpeg/re.html
@@ -384,7 +377,7 @@ default modules.
 
 The following snippet is an example of code that might be useful
 when added to `init.lua`. The snippet adds all Unicode-aware
-functions defined in the [`text` module](#module-text) to the
+functions defined in the [`text` module](#module-pandoc.text) to the
 default `string` module, prefixed with the string `uc_`.
 
 ``` lua
@@ -473,7 +466,7 @@ String library is not Unicode aware
     of the bytes `\240`, `\159`, `\154`, and `\178`, but
     **won't** match the "snowman" Unicode character.
 
-    Use the [pandoc.text](#module-text) module for Unicode-aware
+    Use the [pandoc.text](#module-pandoc.text) module for Unicode-aware
     transformation, and consider using using the lpeg or re
     library for pattern matching.
 
@@ -490,15 +483,13 @@ emphasized text "Hello, World".
 
 ``` lua
 return {
-  {
-    Str = function (elem)
-      if elem.text == "{{helloworld}}" then
-        return pandoc.Emph {pandoc.Str "Hello, World"}
-      else
-        return elem
-      end
-    end,
-  }
+  Str = function (elem)
+    if elem.text == "{{helloworld}}" then
+      return pandoc.Emph {pandoc.Str "Hello, World"}
+    else
+      return elem
+    end
+  end,
 }
 ```
 
@@ -586,7 +577,7 @@ filters living in the same file:
 ``` lua
 local vars = {}
 
-function get_vars (meta)
+local function get_vars (meta)
   for k, v in pairs(meta) do
     if pandoc.utils.type(v) == 'Inlines' then
       vars["%" .. k .. "%"] = {table.unpack(v)}
@@ -594,7 +585,7 @@ function get_vars (meta)
   end
 end
 
-function replace (el)
+local function replace (el)
   if vars[el.text] then
     return pandoc.Span(vars[el.text])
   else
@@ -602,10 +593,12 @@ function replace (el)
   end
 end
 
-return {{Meta = get_vars}, {Str = replace}}
+function Pandoc(doc)
+  return doc:walk { Meta = get_vars }:walk { Str = replace }
+end
 ```
 
-If the contents of file `occupations.md` is
+If the contents of file `occupations.md` are
 
 ``` markdown
 ---
@@ -635,6 +628,9 @@ will output:
 </dd>
 </dl>
 ```
+Note that the placeholders must not contain any spaces, otherwise
+they will turn into two separate Str elements and the filter
+won't work.
 
 ## Modifying pandoc's `MANUAL.txt` for man pages
 
@@ -733,6 +729,133 @@ function Pandoc(el)
     el.blocks:walk(wordcount)
     print(words .. " words in body")
     os.exit(0)
+end
+```
+
+## Creating a table
+
+This filter creates a document that contains the following 
+table with 5 columns. It serves as a working example of how 
+to use the [`pandoc.Table`](#pandoc.Table) constructor. 
+
++--------+--------+--------+--------+---+
+| This   | is my  | table  | header |   |
++========+:=======+:======:+=======:+===+
+| Cell 1 | Cell 2 | Cell 3 |        |   |
++--------+--------+--------+--------+---+
+| Cell 4 | Cell 5 | Cell 6 |        |   |
++========+========+========+========+===+
+| This is my table footer.          |   |
++===================================+===+
+
+: This is my table caption.
+
+Note that:
+
+- The number of columns in the resulting Table element is 
+  equal to the number of entries in the `colspecs` parameter.
+
+- A [ColSpec] object must contain the cell alignment, but the 
+  column width is optional.
+
+- A [TableBody] object is specified using a Lua table in the 
+  `bodies` parameter because there is no `pandoc.TableBody` 
+  constructor.
+
+```lua
+function Pandoc ()
+  local caption = pandoc.Caption( "This is my table caption." )
+  local colspecs = {
+    { pandoc.AlignLeft },
+    { pandoc.AlignDefault }, 
+    { pandoc.AlignCenter }, 
+    { pandoc.AlignRight },
+    { pandoc.AlignDefault }
+  }
+  local head = pandoc.TableHead{
+    pandoc.Row{
+      pandoc.Cell( "This" ), 
+      pandoc.Cell( "is my" ), 
+      pandoc.Cell( "table" ),
+      pandoc.Cell( "header" )
+    }
+  }
+  local bodies = {
+    {
+      attr={},
+      body={ 
+        pandoc.Row{
+          pandoc.Cell( "Cell 1" ), 
+          pandoc.Cell( "Cell 2" ), 
+          pandoc.Cell( "Cell 3" )
+        },
+        pandoc.Row{
+          pandoc.Cell( "Cell 4" ), 
+          pandoc.Cell( "Cell 5" ), 
+          pandoc.Cell( "Cell 6" )
+        }
+      },
+      head={},
+      row_head_columns=0
+    }
+  }
+  local foot = pandoc.TableFoot{
+    pandoc.Row{
+      pandoc.Cell( "This is my table footer.", pandoc.AlignDefault, 1, 4 )
+    }
+  }
+  return pandoc.Pandoc { 
+    pandoc.Table(caption, colspecs, head, bodies, foot) 
+  }
+end
+```
+
+## Extracting links from a document
+
+This filter creates a document containing a table that lists
+the URLs the input document links to, together with the 
+number of links to each URL.
+
+```lua
+links = {}
+
+function Link (el)
+  if links[el.target] then
+    links[el.target] = links[el.target] + 1
+  else
+    links[el.target] = 1
+  end
+  return el
+end
+
+function Pandoc ()
+  local caption = pandoc.Caption("Link count.")
+  local colspecs = { 
+    { pandoc.AlignDefault, 0.8 }, 
+    { pandoc.AlignLeft, 0.2 }
+  }
+  local head = pandoc.TableHead{
+    pandoc.Row{ pandoc.Cell("Target"), pandoc.Cell("Count") }
+  }
+  local foot = pandoc.TableFoot()
+  local rows = {}
+  for link, count in pairs(links) do
+    rows[#rows + 1] = pandoc.Row{ 
+        pandoc.Cell( link ), 
+        pandoc.Cell( pandoc.utils.stringify(count) ) 
+    }
+  end
+  local bodies = {
+    {
+      attr={},
+      body=rows,
+      head={},
+      row_head_columns=0
+    }
+  }
+  return pandoc.Pandoc {
+    pandoc.Table(caption, colspecs, head, bodies, foot)
+  }
 end
 ```
 
@@ -903,7 +1026,7 @@ Usage:
 Pandoc document
 
 Values of this type can be created with the
-[`pandoc.Pandoc`](#pandoc.pandoc) constructor. Pandoc values are
+[`pandoc.Pandoc`](#pandoc.Pandoc) constructor. Pandoc values are
 equal in Lua if and only if they are equal in Haskell.
 
 `blocks`
@@ -912,6 +1035,24 @@ equal in Lua if and only if they are equal in Haskell.
 `meta`
 :   document meta information ([Meta] object)
 
+### Methods {#type-pandoc-methods}
+
+#### normalize
+
+`normalize(self)`
+
+Perform a normalization of Pandoc documents. E.g., multiple
+successive spaces are collapsed, and tables are normalized, so
+that all rows and columns contain the same number of cells.
+
+Parameters:
+
+`self`
+:   the element ([Pandoc][])
+
+Results:
+
+-   cloned and normalized document. ([Pandoc][])
 
 ### walk {#type-pandoc:walk}
 
@@ -2248,8 +2389,7 @@ Fields:
 :   Output file from command line (string or nil)
 
 `log`
-:   A list of log messages in reverse order ([List] of
-    [LogMessage]s)
+:   A list of log messages ([List] of [LogMessage]s)
 
 `request_headers`
 :   Headers to add for HTTP requests; table with header names as
@@ -2910,14 +3050,14 @@ Returns:
 
 ### Cite {#pandoc.Cite}
 
-`Cite (Inlines, citations)`
+`Cite (content, citations)`
 
 Creates a Cite inline element
 
 Parameters:
 
-`Inlines`
-:   placeholder content ([content]{unknown-type="content"})
+`content`
+:   placeholder content ([Inlines])
 
 `citations`
 :   List of Citations ({[Citation]{unknown-type="Citation"},\...})
@@ -3750,6 +3890,33 @@ Parameters:
 
 Returns: the transformed inline element
 
+### `with_state (options, callback)` {#pandoc.with_state}
+
+Runs a function with a modified pandoc state.
+
+The given callback is invoked after setting the pandoc state to the
+given values. The modifiable options are restored to their original
+values once the callback has returned.
+
+The following state variables can be controlled:
+
+  - `request_headers` (list of key-value tuples)
+  - `resource_path` (list of filepaths)
+  - `user_data_dir` (string)
+
+Other options are ignored, and the rest of the state is not modified.
+
+Usage:
+
+    local opts = {
+      request_headers = {
+        {'Authorization', 'Basic my-secret'}
+      }
+    }
+    pandoc.with_state(opts, function ()
+      local mime, contents = pandoc.mediabag.fetch(image_url)
+    )
+
 ### `read (markup[, format[, reader_options[, read_env]]])` {#pandoc.read}
 
 Parse the given string into a Pandoc document.
@@ -3996,7 +4163,7 @@ Parameters:
 
 Returns:
 
--  ([Inlines])
+- ([Inlines])
 
 *Since: 2.2.3*
 
@@ -4026,6 +4193,33 @@ Returns:
 
 *Since: 2.19.1*
 
+### documentation {#pandoc.utils.documentation}
+
+`documentation (object[, format])`
+
+Return the documentation for a function or module defined by
+pandoc. Throws an error if there is no documentation for the given
+object.
+
+The result format can be any textual format accepted by
+`pandoc.write`, and the documentation will be returned in that
+format. Additionally, the special format `blocks` is accepted, in
+which case the documentation is returned as [Blocks].
+
+Parameters:
+
+`object`
+:   Retrieve documentation for this object (any)
+
+`format`
+:   result format; defaults to `'ansi'` (string\|table)
+
+Returns:
+
+- rendered documentation (string\|[Blocks])
+
+*Since: 3.8.4*
+
 ### equals {#pandoc.utils.equals}
 
 `equals (element1, element2)`
@@ -4040,10 +4234,10 @@ operator instead.
 Parameters:
 
 `element1`
-:    (any)
+:   (any)
 
 `element2`
-:    (any)
+:   (any)
 
 Returns:
 
@@ -4070,7 +4264,7 @@ Usage:
 Parameters:
 
 `simple_tbl`
-:    ([SimpleTable])
+:   ([SimpleTable])
 
 Returns:
 
@@ -4097,8 +4291,7 @@ Parameters:
     attribute containing the section number. (boolean)
 
 `baselevel`
-:   shift top-level headings to this level
-    ([integer]{unknown-type="integer"}\|nil)
+:   shift top-level headings to this level (integer\|nil)
 
 `blocks`
 :   list of blocks to process ([Blocks])
@@ -4125,8 +4318,7 @@ Parameters:
 
 Returns:
 
-- normalized date, or nil if normalization failed. ([string or
-  nil]{unknown-type="string or nil"})
+- normalized date, or nil if normalization failed. (string\|nil)
 
 *Since: 2.0.6*
 
@@ -4222,7 +4414,7 @@ Computes the SHA1 hash of the given string input.
 Parameters:
 
 `input`
-:    (string)
+:   (string)
 
 Returns:
 
@@ -4240,8 +4432,8 @@ string with all formatting removed.
 Parameters:
 
 `element`
-:   some pandoc AST element ([AST
-    element]{unknown-type="AST element"})
+:   some pandoc AST element
+    ([Pandoc]\|[Block]\|[Inline]\|[Caption]\|[Cell]\|[MetaValue])
 
 Returns:
 
@@ -4264,8 +4456,7 @@ Usage:
 Parameters:
 
 `n`
-:   positive integer below 4000
-    ([integer]{unknown-type="integer"})
+:   positive integer below 4000 (integer)
 
 Returns:
 
@@ -4342,8 +4533,8 @@ Creates a Version object.
 Parameters:
 
 `v`
-:   version description ([version string, list of integers, or
-    integer]{unknown-type="version string, list of integers, or integer"})
+:   version description
+    ([Version]\|string\|{integer,\...}\|number)
 
 Returns:
 
@@ -4416,6 +4607,7 @@ Returns:
 
 - The entry's MIME type, or `nil` if the file was not found.
   (string)
+
 - Contents of the file, or `nil` if the file was not found.
   (string)
 
@@ -4463,7 +4655,8 @@ Parameters:
 :   filename and path relative to the output folder. (string)
 
 `mimetype`
-:   the item's MIME type; omit if unknown or unavailable. (string)
+:   the item's MIME type; use `nil` if the MIME type is unknown or
+    unavailable. (string\|nil)
 
 `contents`
 :   the binary contents of the file. (string)
@@ -4547,6 +4740,7 @@ Returns:
 
 - The entry's MIME type, or nil if the file was not found.
   (string)
+
 - Contents of the file, or nil if the file was not found. (string)
 
 *Since: 2.0*
@@ -4877,8 +5071,7 @@ Parameters:
 
 Returns:
 
-- all extensions supported for `format`
-  ([FormatExtensions]{unknown-type="FormatExtensions"})
+- all extensions supported for `format` ([FormatExtensions])
 
 *Since: 3.0*
 
@@ -4897,8 +5090,7 @@ Parameters:
 
 Returns:
 
-- default extensions enabled for `format`
-  ([FormatExtensions]{unknown-type="FormatExtensions"})
+- default extensions enabled for `format` ([FormatExtensions])
 
 *Since: 3.0*
 
@@ -5169,6 +5361,32 @@ Returns:
 
 *Since: 2.12*
 
+### exists {#pandoc.path.exists}
+
+`exists (path[, type])`
+
+Check whether there exists a filesystem object at the given path.
+If `type` is given and either *directory* or *file*, then the
+function returns `true` if and only if the file system object has
+the given type, or if it's a symlink pointing to an object of that
+type. Passing *symlink* as type requires the path itself to be a
+symlink. Types other than those will cause an error.
+
+Parameters:
+
+`path`
+:   file path to check (string)
+
+`type`
+:   the required type of the filesystem object (string)
+
+Returns:
+
+- whether a filesystem object of type `type` exists at `path`.
+  (boolean)
+
+*Since: 3.7.1*
+
 ### filename {#pandoc.path.filename}
 
 `filename (filepath)`
@@ -5323,6 +5541,7 @@ Parameters:
 Returns:
 
 - filepath without extension (string)
+
 - extension or empty string (string)
 
 *Since: 2.12*
@@ -5423,7 +5642,7 @@ Parameters:
 
 Returns:
 
-- slide level ([integer]{unknown-type="integer"})
+- slide level (integer)
 
 *Since: 3.0*
 
@@ -5472,7 +5691,7 @@ Parameters:
 
 Returns:
 
--  ([ChunkedDoc])
+- ([ChunkedDoc])
 
 *Since: 3.0*
 
@@ -5496,6 +5715,48 @@ Returns:
 - Table of contents as a BulletList object ([Block])
 
 *Since: 3.0*
+
+### unique_identifier {#pandoc.structure.unique_identifier}
+
+`unique_identifier (inlines[, used[, exts]])`
+
+Generates a unique identifier from a list of inlines, similar to
+what's generated by the `auto_identifiers` extension.
+
+The method used to generated identifiers can be modified through
+`ext`, which is a list of format extensions.
+
+It can be used to generate IDs similar to what the
+`auto_identifiers` extension provides.
+
+Example:
+
+     local used_ids = {}
+     function Header (h)
+       local id =
+         pandoc.structure.unique_identifier(h.content, used_ids)
+       used_ids[id] = true
+       h.identifier = id
+       return h
+     end
+
+Parameters:
+
+`inlines`
+:   base for identifier ([Inlines])
+
+`used`
+:   set of identifiers (string keys, boolean values) that have
+    already been used. (table)
+
+`exts`
+:   list of format extensions ({string,\...})
+
+Returns:
+
+- unique identifier (string)
+
+*Since: 3.8*
 
 <!-- END: AUTOGENERATED CONTENT -->
 
@@ -5530,9 +5791,58 @@ versions and on different platforms.
 
 Returns:
 
-- CPU time in picoseconds ([integer]{unknown-type="integer"})
+- CPU time in picoseconds (integer)
 
 *Since: 3.1.1*
+
+### command {#pandoc.system.command}
+
+`command (command, args[, input[, opts]])`
+
+Executes a system command with the given arguments and `input` on
+*stdin*.
+
+Parameters:
+
+`command`
+:   command to execute (string)
+
+`args`
+:   command arguments ({string,\...})
+
+`input`
+:   input on stdin (string)
+
+`opts`
+:   process options (table)
+
+Returns:
+
+- exit code -- `false` on success, an integer otherwise
+  (integer\|boolean)
+
+- stdout (string)
+
+- stderr (string)
+
+*Since: 3.7.1*
+
+### copy {#pandoc.system.copy}
+
+`copy (source, target)`
+
+Copy a file with its permissions. If the destination file already
+exists, it is overwritten.
+
+Parameters:
+
+`source`
+:   source file (string)
+
+`target`
+:   target destination (string)
+
+*Since: 3.7.1*
 
 ### environment {#pandoc.system.environment}
 
@@ -5602,6 +5912,61 @@ Parameters:
 
 *Since: 2.19*
 
+### read_file {#pandoc.system.read_file}
+
+`read_file (filepath)`
+
+Parameters:
+
+`filepath`
+:   File to read (string)
+
+Returns:
+
+- file contents (string)
+
+*Since: 3.7.1*
+
+### rename {#pandoc.system.rename}
+
+`rename (old, new)`
+
+Change the name of an existing path from `old` to `new`.
+
+If `old` is a directory and `new` is a directory that already
+exists, then `new` is atomically replaced by the `old` directory.
+On Win32 platforms, this function fails if `new` is an existing
+directory.
+
+If `old` does not refer to a directory, then neither may `new`.
+
+Renaming may not work across file system boundaries or due to
+other system-specific reasons. It's generally more robust to copy
+the source path to its destination before deleting the source.
+
+Parameters:
+
+`old`
+:   original path (string)
+
+`new`
+:   new path (string)
+
+*Since: 3.7.1*
+
+### remove {#pandoc.system.remove}
+
+`remove (filename)`
+
+Removes the directory entry for an existing file.
+
+Parameters:
+
+`filename`
+:   file to remove (string)
+
+*Since: 3.7.1*
+
 ### remove_directory {#pandoc.system.remove_directory}
 
 `remove_directory (dirname[, recursive])`
@@ -5618,6 +5983,26 @@ Parameters:
 :   delete content recursively (boolean)
 
 *Since: 2.19*
+
+### times {#pandoc.system.times}
+
+`times (filepath)`
+
+Obtain the modification and access time of a file or directory.
+The times are returned as strings using the ISO 8601 format.
+
+Parameters:
+
+`filepath`
+:   file or directory path (string)
+
+Returns:
+
+- time at which the file or directory was last modified (table)
+
+- time at which the file or directory was last accessed (table)
+
+*Since: 3.7.1*
 
 ### with_environment {#pandoc.system.with_environment}
 
@@ -5695,10 +6080,65 @@ The results of the call to `callback`.
 
 *Since: 2.7.3*
 
+### write_file {#pandoc.system.write_file}
+
+`write_file (filepath, contents)`
+
+Writes a string to a file.
+
+Parameters:
+
+`filepath`
+:   path to target file (string)
+
+`contents`
+:   file contents (string)
+
+*Since: 3.7.1*
+
+### xdg {#pandoc.system.xdg}
+
+`xdg (xdg_directory_type[, filepath])`
+
+Access special directories and directory search paths.
+
+Special directories for storing user-specific application data,
+configuration, and cache files, as specified by the [XDG Base
+Directory Specification].
+
+Parameters:
+
+`xdg_directory_type`
+
+:   The type of the XDG directory or search path. Must be one of
+    `config`, `data`, `cache`, `state`, `datadirs`, or
+    `configdirs`.
+
+    Matching is case-insensitive, and underscores and `XDG`
+    prefixes are ignored, so a value like `XDG_DATA_DIRS` is also
+    acceptable.
+
+    The `state` directory might not be available, depending on the
+    version of the underlying Haskell library. (string)
+
+`filepath`
+:   relative path that is appended to the path; ignored if the
+    result is a list of search paths. (string)
+
+Returns:
+
+- Either a single file path, or a list of search paths.
+  (string\|{string,\...})
+
+*Since: 3.7.1*
+
 <!-- END: AUTOGENERATED CONTENT -->
 
 
-<!-- BEGIN: AUTOGENERATED CONTENT for module pandoc.layout -->
+<!-- Auto-generation temporarily disabled; needs updates in the documenation
+renderer and in `hslua-packaging`. -->
+
+<!-- BEGIN DISABLED: AUTOGENERATED CONTENT for module pandoc.layout -->
 
 # Module pandoc.layout
 
@@ -6147,7 +6587,7 @@ Returns:
 `render (doc[, colwidth[, style]])`
 
 Render a [Doc]. The text is reflowed on breakable spaces to match
-the given line length. Text is not reflowed if the line line
+the given line length. Text is not reflowed if the line
 length parameter is omitted or nil.
 
 Parameters:
@@ -6414,6 +6854,7 @@ Scaffolding for custom writers.
 An object to be used as a `Writer` function; the construct handles
 most of the boilerplate, expecting only render functions for all
 AST elements (table)
+
 <!-- END: AUTOGENERATED CONTENT -->
 
 <!-- BEGIN: AUTOGENERATED CONTENT for module pandoc.text -->
@@ -6477,7 +6918,7 @@ Parameters:
 
 Returns:
 
-- length ([integer]{unknown-type="integer"}\|string)
+- length (integer\|string)
 
 *Since: 2.0.3*
 
@@ -6528,16 +6969,58 @@ Parameters:
 :   UTF-8 string (string)
 
 `i`
-:   substring start position ([integer]{unknown-type="integer"})
+:   substring start position (integer)
 
 `j`
-:   substring end position ([integer]{unknown-type="integer"})
+:   substring end position (integer)
 
 Returns:
 
 - text substring (string)
 
 *Since: 2.0.3*
+
+### subscript {#pandoc.text.subscript}
+
+`subscript (input)`
+
+Tries to convert the string into a Unicode subscript version of
+the string. Returns `nil` if not all characters of the input can
+be mapped to a subscript Unicode character. Supported characters
+include numbers, parentheses, and plus/minus.
+
+Parameters:
+
+`input`
+:   string to convert to subscript characters (string)
+
+Returns:
+
+- Subscript version of the input, or `nil` if not all characters
+  could be converted. (string\|nil)
+
+*Since: 3.8*
+
+### superscript {#pandoc.text.superscript}
+
+`superscript (input)`
+
+Tries to convert the string into a Unicode superscript version of
+the string. Returns `nil` if not all characters of the input can
+be mapped to a superscript Unicode character. Supported characters
+include numbers, parentheses, and plus/minus.
+
+Parameters:
+
+`input`
+:   string to convert to superscript characters (string)
+
+Returns:
+
+- Superscript version of the input, or `nil` if not all characters
+  could be converted. (string\|nil)
+
+*Since: 3.8*
 
 ### toencoding {#pandoc.text.toencoding}
 
@@ -6715,7 +7198,7 @@ Returns:
 
 ## Types {#pandoc.template-types}
 
-### Template {#type-pandoc.Template}
+### Template {#type-pandoc.template.Template}
 
 <!-- END: AUTOGENERATED CONTENT -->
 
@@ -6736,7 +7219,7 @@ Parameters:
 `version_specifier`
 :   A version string like `'2.7.3'`, a Lua number like `2.0`, a
     list of integers like `{2,7,3}`, or a Version object.
-    (string\|number\|{[integer]{unknown-type="integer"},\...}\|[Version])
+    (string\|number\|{integer,\...}\|[Version])
 
 Returns:
 
@@ -6744,9 +7227,71 @@ Returns:
 
 *Since: 2.7.3*
 
+### Sources {#pandoc.types.Sources}
+
+`Sources (srcs)`
+
+Creates a new Sources element, i.e., a list of [Source] items.
+
+Pandoc's text readers expect the input text to be paired with
+information on where the text originated, e.g., a file name. This
+abstraction is provided via the `Sources` type.
+
+Pandoc accepts a range of objects wherever a *Sources* list is
+expected:
+
+- a list of [Source] items;
+- a simple string, which becomes an unnamed source;
+- a list of table objects, where each table contains the fields
+  `name` (the filepath) and `text` (the file contents)
+
+A Sources list can be converted to a string via the default
+`tostring` Lua function. This will concatenate all source items.
+
+Parameters:
+
+`srcs`
+:   sources (string\|{string,\...}\|table)
+
+Returns:
+
+- new Sources object ({[Source],\...})
+
+*Since: 3.9.1*
+
+## Types {#pandoc.types-types}
+
+### Source {#type-pandoc.types.Source}
+
+### Version {#type-pandoc.types.Version}
+
+#### Methods
+
+##### Version.must_be_at_least {#Version.must_be_at_least}
+
+`Version.must_be_at_least (self, reference[, msg])`
+
+Parameters:
+
+`self`
+:   version to check ([Version])
+
+`reference`
+:   minimum version ([Version])
+
+`msg`
+:   alternative message (string)
+
+Returns:
+
+Returns no result, and throws an error if this version is older
+than `reference`.
+
 <!-- END: AUTOGENERATED CONTENT -->
 
-<!-- BEGIN: AUTOGENERATED CONTENT for module pandoc.zip -->
+<!-- Disabled due to limitations in the current documentation
+     renderer. -->
+<!-- BEGIN DISABLED: AUTOGENERATED CONTENT for module pandoc.zip -->
 
 # Module pandoc.zip
 
@@ -6805,7 +7350,7 @@ Parameters:
 :   uncompressed contents (string)
 
 `modtime`
-:   modification time ([integer]{unknown-type="integer"})
+:   modification time (integer)
 
 Returns:
 
@@ -6822,7 +7367,7 @@ Generates a ZipEntry from a file or directory.
 Parameters:
 
 `filepath`
-:    (string)
+:   (string)
 
 `opts`
 :   zip options (table)
@@ -6949,7 +7494,9 @@ Returns:
 
 - link target if entry represents a symbolic link (string\|nil)
 
-<!-- END: AUTOGENERATED CONTENT -->
+[zip.Entry]: #type-pandoc.zip.Entry
+[zip.Archive]: #type-pandoc.zip.Archive
+<!-- END DISABLED: AUTOGENERATED CONTENT -->
 
 <!-- BEGIN: GENERATED REFERENCE LINKS -->
 
@@ -6978,11 +7525,12 @@ Returns:
   [Table]: #type-table
   [Version]: #type-version
   [`list`]: #pandoc.mediabag.list
+  [FormatExtensions]: #FormatExtensions
   [WriterOptions]: #type-writeroptions
   [null]: #pandoc.json.null
   [this blog post]: http://neilmitchell.blogspot.co.uk/2015/10/filepaths-are-subtle-symlinks-are-hard.html
   [ChunkedDoc]: #type-chunkeddoc
+  [XDG Base Directory Specification]: https://specifications.freedesktop.org/basedir-spec/latest/
   [Doc]: #type-doc
   [Template]: #type-template
-  [zip.Entry]: #type-pandoc.zip.Entry
-  [zip.Archive]: #type-pandoc.zip.Archive
+  [Source]: #type-pandoc.types.Source

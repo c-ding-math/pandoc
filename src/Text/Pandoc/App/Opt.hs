@@ -2,6 +2,7 @@
 {-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE CPP                 #-}
 {-# LANGUAGE DeriveGeneric       #-}
+{-# LANGUAGE PatternSynonyms     #-}
 {-# LANGUAGE TemplateHaskell     #-}
 {-# LANGUAGE FlexibleInstances   #-}
 {-# LANGUAGE FlexibleContexts    #-}
@@ -27,12 +28,12 @@ module Text.Pandoc.App.Opt (
           , fullDefaultsPath
           ) where
 import Control.Monad.Except (throwError)
-import Control.Monad.Trans (MonadIO, liftIO)
+import Control.Monad.Trans (MonadIO, liftIO, lift)
 import Control.Monad ((>=>), foldM)
 import Control.Monad.State.Strict (StateT, modify, gets)
 import System.FilePath ( addExtension, (</>), takeExtension, takeDirectory )
 import System.Directory ( canonicalizePath )
-import Data.Char (toLower)
+import Data.Char (toLower, isSpace)
 import Data.Maybe (fromMaybe)
 import GHC.Generics hiding (Meta)
 import Text.Pandoc.Filter (Filter (..))
@@ -43,7 +44,8 @@ import Text.Pandoc.Options (TopLevelDivision (TopLevelDefault),
                             ReferenceLocation (EndOfDocument),
                             CaptionPosition (..),
                             ObfuscationMethod (NoObfuscation),
-                            CiteMethod (Citeproc))
+                            CiteMethod (Citeproc),
+                            pattern DefaultHighlightingString)
 import Text.Pandoc.Class (readFileStrict, fileExists, setVerbosity, report,
                           PandocMonad(lookupEnv), getUserDataDir)
 import Text.Pandoc.Error (PandocError (PandocParseError, PandocSomeError))
@@ -60,7 +62,7 @@ import qualified Data.Map as M
 import qualified Data.ByteString.Char8 as B8
 import Text.Pandoc.Definition (Meta(..), MetaValue(..))
 import Data.Aeson (defaultOptions, Options(..), Result(..),
-                   genericToJSON, fromJSON, camelTo2)
+                   genericToJSON, fromJSON, camelTo2, eitherDecodeStrict)
 import Data.Aeson.TH (deriveJSON)
 import Control.Applicative ((<|>))
 import Data.Yaml
@@ -124,8 +126,8 @@ data Opt = Opt
     , optEmbedResources        :: Bool    -- ^ Make HTML accessible offline
     , optLinkImages            :: Bool    -- ^ Link ODT images rather than embedding
     , optHtmlQTags             :: Bool    -- ^ Use <q> tags in HTML
-    , optHighlightStyle        :: Maybe Text -- ^ Style to use for highlighted code
     , optSyntaxDefinitions     :: [FilePath]  -- ^ xml syntax defs to load
+    , optSyntaxHighlighting    :: Text -- ^ Syntax highlighting method for code
     , optTopLevelDivision      :: TopLevelDivision -- ^ Type of the top-level divisions
     , optHTMLMathMethod        :: HTMLMathMethod -- ^ Method to print HTML math
     , optAbbreviations         :: Maybe FilePath -- ^ Path to abbrevs file
@@ -157,7 +159,6 @@ data Opt = Opt
     , optIndentedCodeClasses   :: [Text] -- ^ Default classes for indented code blocks
     , optDataDir               :: Maybe FilePath
     , optCiteMethod            :: CiteMethod -- ^ Method to output cites
-    , optListings              :: Bool       -- ^ Use listings package for code blocks
     , optPdfEngine             :: Maybe String -- ^ Program to use for latex/html -> pdf
     , optPdfEngineOpts         :: [String]   -- ^ Flags to pass to the engine
     , optSlideLevel            :: Maybe Int  -- ^ Header level that creates slides
@@ -211,8 +212,8 @@ instance FromJSON Opt where
        <*> o .:? "embed-resources" .!= optEmbedResources defaultOpts
        <*> o .:? "link-images" .!= optLinkImages defaultOpts
        <*> o .:? "html-q-tags" .!= optHtmlQTags defaultOpts
-       <*> o .:? "highlight-style"
        <*> o .:? "syntax-definitions" .!= optSyntaxDefinitions defaultOpts
+       <*> o .:? "syntax-highlighting" .!= optSyntaxHighlighting defaultOpts
        <*> o .:? "top-level-division" .!= optTopLevelDivision defaultOpts
        <*> o .:? "html-math-method" .!= optHTMLMathMethod defaultOpts
        <*> o .:? "abbreviations"
@@ -245,7 +246,6 @@ instance FromJSON Opt where
        <*> o .:? "indented-code-classes" .!= optIndentedCodeClasses defaultOpts
        <*> o .:? "data-dir"
        <*> o .:? "cite-method" .!= optCiteMethod defaultOpts
-       <*> o .:? "listings" .!= optListings defaultOpts
        <*> o .:? "pdf-engine"
        <*> o .:? "pdf-engine-opts" .!= optPdfEngineOpts defaultOpts
        <*> o .:? "slide-level"
@@ -319,6 +319,7 @@ resolveVarsInOpt
     , optOutputFile            = oOutputFile
     , optInputFiles            = oInputFiles
     , optSyntaxDefinitions     = oSyntaxDefinitions
+    , optSyntaxHighlighting    = oSyntaxHighlighting
     , optAbbreviations         = oAbbreviations
     , optReferenceDoc          = oReferenceDoc
     , optEpubMetadata          = oEpubMetadata
@@ -337,7 +338,6 @@ resolveVarsInOpt
     , optBibliography          = oBibliography
     , optCitationAbbreviations = oCitationAbbreviations
     , optPdfEngine             = oPdfEngine
-    , optHighlightStyle        = oHighlightStyle
     }
   = do
       oTo' <- mapM (fmap T.pack . resolveVars . T.unpack) oTo
@@ -365,7 +365,7 @@ resolveVarsInOpt
       oBibliography' <- mapM resolveVars oBibliography
       oCitationAbbreviations' <- mapM resolveVars oCitationAbbreviations
       oPdfEngine' <- mapM resolveVars oPdfEngine
-      oHighlightStyle' <- mapM (fmap T.pack . resolveVars . T.unpack) oHighlightStyle
+      oSyntaxHighlighting' <- T.pack <$> resolveVars (T.unpack oSyntaxHighlighting)
       return opt{ optTo                    = oTo'
                 , optFrom                  = oFrom'
                 , optTemplate              = oTemplate'
@@ -373,6 +373,7 @@ resolveVarsInOpt
                 , optOutputFile            = oOutputFile'
                 , optInputFiles            = oInputFiles'
                 , optSyntaxDefinitions     = oSyntaxDefinitions'
+                , optSyntaxHighlighting    = oSyntaxHighlighting'
                 , optAbbreviations         = oAbbreviations'
                 , optReferenceDoc          = oReferenceDoc'
                 , optEpubMetadata          = oEpubMetadata'
@@ -391,43 +392,52 @@ resolveVarsInOpt
                 , optBibliography          = oBibliography'
                 , optCitationAbbreviations = oCitationAbbreviations'
                 , optPdfEngine             = oPdfEngine'
-                , optHighlightStyle        = oHighlightStyle'
                 }
 
  where
-  resolveVars :: FilePath -> StateT DefaultsState m FilePath
-  resolveVars [] = return []
-  resolveVars ('$':'{':xs) =
+  resolveVars = expandVars (optDataDir opt)
+  resolveVarsInFilter (JSONFilter fp) =
+    JSONFilter <$> resolveVars fp
+  resolveVarsInFilter (LuaFilter fp) =
+    LuaFilter <$> resolveVars fp
+  resolveVarsInFilter CiteprocFilter = return CiteprocFilter
+
+
+expandVars :: (PandocMonad m, MonadIO m)
+           => Maybe FilePath
+           -> FilePath
+           -> StateT DefaultsState m FilePath
+expandVars _ [] = return []
+expandVars mbDataDir ('$':'{':xs) =
     let (ys, zs) = break (=='}') xs
      in if null zs
            then return $ '$':'{':xs
            else do
-             val <- lookupEnv' ys
-             (val ++) <$> resolveVars (drop 1 zs)
-  resolveVars (c:cs) = (c:) <$> resolveVars cs
-  lookupEnv' :: String -> StateT DefaultsState m String
-  lookupEnv' "." = do
+             val <- expandEnv mbDataDir ys
+             (val ++) <$> expandVars mbDataDir (drop 1 zs)
+expandVars mbDataDir (c:cs) = (c:) <$> expandVars mbDataDir cs
+
+expandEnv :: (PandocMonad m, MonadIO m)
+          => Maybe FilePath
+          -> String
+          -> StateT DefaultsState m String
+expandEnv _ "." = do
     mbCurDefaults <- gets curDefaults
     maybe (return "")
           (fmap takeDirectory . liftIO . canonicalizePath)
           mbCurDefaults
-  lookupEnv' "USERDATA" = do
-    mbodatadir <- mapM resolveVars oDataDir
-    mbdatadir  <- getUserDataDir
+expandEnv mbDataDir "USERDATA" = do
+    mbodatadir <- mapM (expandVars mbDataDir) mbDataDir
+    mbdatadir'  <- getUserDataDir
     defdatadir <- liftIO defaultUserDataDir
-    return $ fromMaybe defdatadir (mbodatadir <|> mbdatadir)
-  lookupEnv' v = do
+    return $ fromMaybe defdatadir (mbodatadir <|> mbdatadir')
+expandEnv _ v = do
     mbval <- fmap T.unpack <$> lookupEnv (T.pack v)
     case mbval of
       Nothing -> do
         report $ EnvironmentVariableUndefined (T.pack v)
         return mempty
       Just x  -> return x
-  resolveVarsInFilter (JSONFilter fp) =
-    JSONFilter <$> resolveVars fp
-  resolveVarsInFilter (LuaFilter fp) =
-    LuaFilter <$> resolveVars fp
-  resolveVarsInFilter CiteprocFilter = return CiteprocFilter
 
 
 
@@ -438,8 +448,9 @@ parseDefaults :: (PandocMonad m, MonadIO m)
 parseDefaults n dataDir = parseDefsNames n >>= \ds -> return $ \o -> do
   -- get parent defaults:
   defsParent <- gets $ fromMaybe "" . curDefaults
+  expandedDataDir <- mapM (expandVars dataDir) dataDir
   -- get child defaults:
-  defsChildren <- mapM (fullDefaultsPath dataDir) ds
+  defsChildren <- mapM (\d -> expandVars expandedDataDir d >>= lift . fullDefaultsPath expandedDataDir) ds
   -- expand parent in defaults inheritance graph by children:
   defsGraph <- gets inheritanceGraph
   let defsGraphExp = expand defsGraph defsChildren defsParent
@@ -555,8 +566,9 @@ doOpt (k,v) = do
       parseJSON v >>= \x -> return (\o -> o{ optLinkImages = x })
     "html-q-tags" ->
       parseJSON v >>= \x -> return (\o -> o{ optHtmlQTags = x })
+    -- Deprecated
     "highlight-style" ->
-      parseJSON v >>= \x -> return (\o -> o{ optHighlightStyle = x })
+      parseJSON v >>= \x -> return (\o -> o{ optSyntaxHighlighting = x })
     "syntax-definition" ->
       (parseJSON v >>= \x ->
                 return (\o -> o{ optSyntaxDefinitions =
@@ -569,6 +581,8 @@ doOpt (k,v) = do
       parseJSON v >>= \x ->
              return (\o -> o{ optSyntaxDefinitions =
                                 optSyntaxDefinitions o <> map unpack x })
+    "syntax-highlighting" ->
+      parseJSON v >>= \x -> return (\o -> o{ optSyntaxHighlighting = x })
     "top-level-division" ->
       parseJSON v >>= \x -> return (\o -> o{ optTopLevelDivision = x })
     "html-math-method" ->
@@ -647,7 +661,10 @@ doOpt (k,v) = do
     "cite-method" ->
       parseJSON v >>= \x -> return (\o -> o{ optCiteMethod = x })
     "listings" ->
-      parseJSON v >>= \x -> return (\o -> o{ optListings = x })
+      parseJSON v >>= \x ->
+        if x
+        then return (\o -> o{ optSyntaxHighlighting = "idiomatic" })
+        else return id
     "pdf-engine" ->
       parseJSON v >>= \x -> return (\o -> o{ optPdfEngine = unpack <$> x })
     "pdf-engine-opts" ->
@@ -773,8 +790,8 @@ defaultOpts = Opt
     , optEmbedResources        = False
     , optLinkImages            = False
     , optHtmlQTags             = False
-    , optHighlightStyle        = Just "pygments"
     , optSyntaxDefinitions     = []
+    , optSyntaxHighlighting    = DefaultHighlightingString
     , optTopLevelDivision      = TopLevelDefault
     , optHTMLMathMethod        = PlainMath
     , optAbbreviations         = Nothing
@@ -806,7 +823,6 @@ defaultOpts = Opt
     , optIndentedCodeClasses   = []
     , optDataDir               = Nothing
     , optCiteMethod            = Citeproc
-    , optListings              = False
     , optPdfEngine             = Nothing
     , optPdfEngineOpts         = []
     , optSlideLevel            = Nothing
@@ -853,11 +869,19 @@ applyDefaults opt file = do
   setVerbosity $ optVerbosity opt
   modify $ \defsState -> defsState{ curDefaults = Just file }
   inp <- readFileStrict file
-  case decodeEither' (B8.unlines . takeWhile (/= "...") . B8.lines $ inp) of
-      Right f -> f opt
-      Left err'  -> throwError $
-         PandocParseError
-             $ T.pack $ Data.Yaml.prettyPrintParseException err'
+  let isJSON = B8.take 1 (B8.dropWhile isSpace inp) == "{"
+  if isJSON
+     then
+       case eitherDecodeStrict inp of
+         Right f -> f opt
+         Left err' -> throwError $ PandocParseError $ T.pack $
+            "Error parsing " <> file <> ":\n" <> err'
+     else
+       case decodeEither' (B8.unlines . takeWhile (/= "...") . B8.lines $ inp) of
+           Right f -> f opt
+           Left err'  -> throwError $ PandocParseError $ T.pack $
+                  "Error parsing " <> file <> ":\n" <>
+                  Data.Yaml.prettyPrintParseException err'
 
 fullDefaultsPath :: (PandocMonad m, MonadIO m)
                  => Maybe FilePath

@@ -2,7 +2,7 @@ VERSION?=$(shell grep '^[Vv]ersion:' pandoc.cabal | awk '{print $$2;}')
 PANDOC_CLI_VERSION?=$(shell grep '^[Vv]ersion:' pandoc-cli/pandoc-cli.cabal | awk '{print $$2;}')
 SOURCEFILES?=$(shell git ls-tree -r main --name-only src pandoc-cli pandoc-server pandoc-lua-engine | grep "\.hs$$")
 PANDOCSOURCEFILES?=$(shell git ls-tree -r main --name-only src | grep "\.hs$$")
-DOCKERIMAGE=quay.io/benz0li/ghc-musl:9.8
+DOCKERIMAGE=quay.io/benz0li/ghc-musl:9.10
 TIMESTAMP=$(shell date "+%Y%m%d_%H%M")
 LATESTBENCH=$(word 1,$(shell ls -t bench_*.csv 2>/dev/null))
 BASELINE?=$(LATESTBENCH)
@@ -12,19 +12,18 @@ BASELINECMD=
 else
 BASELINECMD=--baseline $(BASELINE)
 endif
-GHCOPTS=-fwrite-ide-info -fdiagnostics-color=always -j +RTS -A8m -RTS
-CABALOPTS?=--disable-optimization -f-export-dynamic
+CABALOPTS?=--disable-optimization -f-export-dynamic -fhttp --ghc-option=-fwrite-ide-info --ghc-option=-fdiagnostics-color=always --ghc-option=-j
 WEBSITE=../../web/pandoc.org
 REVISION?=1
 BENCHARGS?=--csv bench_$(TIMESTAMP).csv $(BASELINECMD) --timeout=6 +RTS -T --nonmoving-gc -RTS $(if $(PATTERN),--pattern "$(PATTERN)",)
 pandoc=$(shell cabal list-bin $(CABALOPTS) pandoc-cli)
+OPTIMIZE_WASM?=1
 
 all: build test binpath ## build executable and run tests
 .PHONY: all
 
 build: ## build executable
 	cabal build \
-	  --ghc-options='$(GHCOPTS)' \
 	  $(CABALOPTS) pandoc-cli
 .PHONY: build
 
@@ -33,7 +32,7 @@ prof: ## build with profiling and optimizations
 .PHONY: prof
 
 binpath: ## print path of built pandoc executable
-	@cabal list-bin -v0 $(CABALOPTS) --ghc-options='$(GHCOPTS)' pandoc-cli
+	@cabal list-bin -v0 $(CABALOPTS) pandoc-cli
 .PHONY: binpath
 
 ghcid: ## run ghcid
@@ -52,14 +51,12 @@ linecounts: ## print line counts for each module
 # make test TESTARGS='--accept'
 test:  ## unoptimized build and run tests with cabal
 	cabal test \
-	  --ghc-options='$(GHCOPTS)' \
 	  $(CABALOPTS) \
 	  --test-options="--hide-successes --ansi-tricks=false $(TESTARGS)" all
 .PHONY: test
 
 quick-stack: ## unoptimized build and tests with stack
 	stack install \
-	  --ghc-options='$(GHCOPTS)' \
 	  --system-ghc --flag 'pandoc:embed_data_files' \
 	  --fast \
 	  --test \
@@ -149,16 +146,12 @@ latex-package-dependencies: ## print packages used by default latex template
 
 coverage: ## code coverage information
 	cabal test \
-	  --ghc-options='-fhpc $(GHCOPTS)' \
+	  --ghc-option=-fhpc \
 	  $(CABALOPTS) \
 	  --test-options="--hide-successes --ansi-tricks=false $(TESTARGS)"
 	hpc markup --destdir=coverage test/test-pandoc.tix
 	open coverage/hpc_index.html
 .PHONY: coverage
-
-weeder: ## run weeder to find dead code
-	weeder
-.PHONY: weeder
 
 transitive-deps: ## print transitive dependencies
 	cabal-plan topo | sort | sed -e 's/-[0-9]\..*//'
@@ -169,8 +162,7 @@ debpkg: ## create linux package
                    -v `pwd`/linux/artifacts:/artifacts \
 		   --user $(id -u):$(id -g) \
 		   -e REVISION=$(REVISION) \
-       -e GHCOPTS="-j4 +RTS -A256m -RTS -split-sections -optc-Os -optl=-pthread" \
-       -e CABALOPTS="-f-export-dynamic -fembed_data_files -fserver -flua --enable-executable-static -j4" \
+       -e CABALOPTS="-f-export-dynamic -fembed_data_files -fserver -flua --enable-executable-static -j4 --ghc-option=-j4 --ghc-option=-split-sections --ghc-option=-optc-Os --ghc-option=-optl=-pthread" \
 		   -w /mnt \
 		   --memory=0 \
 		   --rm \
@@ -238,7 +230,7 @@ update-website: ## update website and upload
 .PHONY: update-website
 
 update-translations: ## update data/translations from Babel and Polyglossia
-	python tools/update-translations.py
+	python3 tools/update-translations.py
 .PHONY: update-translations
 
 validate-docx-golden-tests: ## validate docx golden tests against schema
@@ -317,7 +309,6 @@ help: ## display this help
 	@echo
 	@echo "Environment variables with default values:"
 	@printf "%-16s%s\n" "CABALOPTS" "$(CABALOPTS)"
-	@printf "%-16s%s\n" "GHCOPTS" "$(GHCOPTS)"
 	@printf "%-16s%s\n" "TESTARGS" "$(TESTARGS)"
 	@printf "%-16s%s\n" "BASELINE" "$(BASELINE)"
 	@printf "%-16s%s\n" "REVISION" "$(REVISION)"
@@ -332,3 +323,16 @@ release-checklist-$(VERSION).org: RELEASE-CHECKLIST-TEMPLATE.org
 hie.yaml: ## regenerate hie.yaml
 	gen-hie > $@
 .PHONY: hie.yaml
+
+pandoc.wasm: ## build pandoc.wasm
+	-rm $@
+	wasm32-wasi-cabal update
+	wasm32-wasi-cabal build pandoc-cli
+ifeq ($(OPTIMIZE_WASM),1)
+	echo "Optimizing (this may take a long time, to avoid, set OPTIMIZE_WASM=0)..."
+	wasm-opt -Oz $$(wasm32-wasi-cabal list-bin pandoc-cli | tail -1) -o $@
+else
+	echo "Copying unoptimized pandoc.wasm..."
+	cp "$$(wasm32-wasi-cabal list-bin pandoc-cli | tail -1)" "$@"
+endif
+.PHONY: pandoc.wasm

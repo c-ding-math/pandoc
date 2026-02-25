@@ -7,15 +7,15 @@ task:
     image: ghcr.io/cirruslabs/macos-monterey-base:latest
   brew_script:
     - brew update
-    - brew install ghc@9.8 cabal-install
+    - brew install ghc@9.10 cabal-install
   env:
-    PATH: /opt/homebrew/opt/ghc@9.8/bin:${PATH}
+    PATH: /opt/homebrew/opt/ghc@9.10/bin:${PATH}
   cabal_store_cache:
     folder: ~/.cabal/store
     fingerprint_key: macos_2023_03_12
   deps_script:
     - cabal update
-    - cabal build all -fembed_data_files -fserver -flua --dependencies-only
+    - cabal build all -fembed_data_files -fhttp -fserver -flua --dependencies-only
   upload_caches:
     - cabal_store
   install_script:
@@ -29,11 +29,11 @@ task:
   trigger_type: manual
   timeout_in: 90m
   arm_container:
-    image: quay.io/benz0li/ghc-musl:9.8
+    image: quay.io/benz0li/ghc-musl:9.10
     cpu: 4
     memory: 12G
   env:
-    CABALOPTS: -f-export-dynamic -fembed_data_files -fserver -flua --enable-executable-static -j4
+    CABALOPTS: -f-export-dynamic -fembed_data_files -fhttp -fserver -flua --enable-executable-static -j4
     GHCOPTS: -j4 +RTS -A256m -RTS -split-sections -optc-Os -optl=-pthread
   cabal_store_cache:
     folder: ~/.cabal/store
@@ -44,8 +44,8 @@ task:
   upload_caches:
     - cabal_store
   package_script:
-    - cabal freeze && cat cabal.project.freeze
     - bash linux/make_artifacts.sh
+    - cabal freeze && cat cabal.project.freeze
   linux_arm64_artifacts:
     path: ./linux-arm64/**
 
@@ -55,11 +55,11 @@ task:
   trigger_type: manual
   timeout_in: 90m
   container:
-    image: quay.io/benz0li/ghc-musl:9.8
+    image: quay.io/benz0li/ghc-musl:9.10
     cpu: 4
     memory: 12G
   env:
-    CABALOPTS: -f-export-dynamic -fembed_data_files -fserver -flua --enable-executable-static -j4
+    CABALOPTS: -f-export-dynamic -fembed_data_files -fhttp -fserver -flua --enable-executable-static -j4
     GHCOPTS: -j4 +RTS -A256m -RTS -split-sections -optc-Os -optl=-pthread
   cabal_store_cache:
     folder: ~/.cabal/store

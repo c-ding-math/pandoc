@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Text.Pandoc.Readers.LaTeX.Math
-  ( dollarsMath
+  ( withMathMode
+  , dollarsMath
   , inlineEnvironments
   , inlineEnvironmentNames
   , inlineEnvironment
@@ -13,14 +14,14 @@ module Text.Pandoc.Readers.LaTeX.Math
   )
 where
 import Data.Maybe (fromMaybe, mapMaybe, listToMaybe)
-import Data.List (foldl')
+import qualified Data.List as L
 import Text.Pandoc.Walk (walk)
 import Text.Pandoc.Builder as B
 import qualified Data.Sequence as Seq
 import Text.Pandoc.Readers.LaTeX.Parsing
 import Text.Pandoc.TeX
 import Text.Pandoc.Class
-import Text.Pandoc.Shared (trimMath, stripTrailingNewlines)
+import Text.Pandoc.Shared (trimMath, trimr)
 import Text.Pandoc.Parsing hiding (blankline, mathDisplay, mathInline,
                             optional, space, spaces, withRaw, (<|>))
 import Control.Applicative ((<|>), optional)
@@ -28,11 +29,19 @@ import Control.Monad (guard, mzero)
 import qualified Data.Map as M
 import Data.Text (Text)
 
+withMathMode :: PandocMonad m => LP m a -> LP m a
+withMathMode p = do
+  oldMathMode <- sMathMode <$> getState
+  updateState $ \s -> s{ sMathMode = True }
+  result <- p
+  updateState $ \s -> s{ sMathMode = oldMathMode }
+  return result
+
 dollarsMath :: PandocMonad m => LP m Inlines
 dollarsMath = do
   symbol '$'
   display <- option False (True <$ symbol '$')
-  (do contents <- try $ untokenize <$> pDollarsMath 0
+  (do contents <- try $ untokenize <$> withMathMode (pDollarsMath 0)
       if display
          then mathDisplay contents <$ symbol '$'
          else return $ mathInline contents)
@@ -76,10 +85,10 @@ mathEnvWith f _ name = f . rawMath . inner <$> mathEnv name
          rawMath = B.rawInline "latex"
 
 mathEnv :: PandocMonad m => Text -> LP m Text
-mathEnv name = do
+mathEnv name = withMathMode $ do
   optional blankline
   res <- manyTill anyTok (end_ name)
-  return $ stripTrailingNewlines $ untokenize res
+  return $ trimr $ untokenize res
 
 inlineEnvironment :: PandocMonad m => LP m Inlines
 inlineEnvironment = try $ do
@@ -95,20 +104,21 @@ inlineEnvironments :: PandocMonad m => M.Map Text (LP m Inlines)
 inlineEnvironments = M.fromList [
     ("displaymath", mathEnvWith id Nothing "displaymath")
   , ("math", math <$> mathEnv "math")
-  , ("equation", mathEnvWith id Nothing "equation")
-  , ("equation*", mathEnvWith id Nothing "equation*")
-  , ("gather", mathEnvWith id (Just "gathered") "gather")
-  , ("gather*", mathEnvWith id (Just "gathered") "gather*")
-  , ("multline", mathEnvWith id (Just "gathered") "multline")
-  , ("multline*", mathEnvWith id (Just "gathered") "multline*")
-  , ("eqnarray", mathEnvWith id (Just "aligned") "eqnarray")
-  , ("eqnarray*", mathEnvWith id (Just "aligned") "eqnarray*")
-  , ("align", mathEnvWith id (Just "aligned") "align")
-  , ("align*", mathEnvWith id (Just "aligned") "align*")
-  , ("alignat", mathEnvWith id (Just "aligned") "alignat")
-  , ("alignat*", mathEnvWith id (Just "aligned") "alignat*")
-  , ("flalign", mathEnvWith id (Just "aligned") "flalign")
-  , ("flalign*", mathEnvWith id (Just "aligned") "flalign*")
+  , ("equation", mathEnvWith id (Just "equation") "equation")
+  , ("equation*", mathEnvWith id (Just "equation*") "equation*")
+  , ("gather", mathEnvWith id (Just "gather") "gather")
+  , ("gather*", mathEnvWith id (Just "gather*") "gather*")
+  , ("multline", mathEnvWith id (Just "multline") "multline")
+  , ("multline*", mathEnvWith id (Just "multline*") "multline*")
+  , ("eqnarray", mathEnvWith id (Just "eqnarray") "eqnarray")
+  , ("eqnarray*", mathEnvWith id (Just "eqnarray*") "eqnarray*")
+  , ("align", mathEnvWith id (Just "align") "align")
+  , ("align*", mathEnvWith id (Just "align*") "align*")
+  , ("alignat", mathEnvWith id (Just "alignat") "alignat")
+  , ("alignat*", mathEnvWith id (Just "alignat*") "alignat*")
+  , ("flalign", mathEnvWith id (Just "flalign") "flalign")
+  , ("flalign*", mathEnvWith id (Just "flalign*") "flalign*")
+  -- the following are not yet handled by texmath, so we use substitutes:
   , ("dmath", mathEnvWith id Nothing "dmath")
   , ("dmath*", mathEnvWith id Nothing "dmath*")
   , ("dgroup", mathEnvWith id (Just "aligned") "dgroup")
@@ -156,7 +166,7 @@ newtheorem inline = do
 extractLabelFromBlock :: Block -> Maybe Text
 extractLabelFromBlock (Para inlines) = extractLabel Nothing inlines
   where
-    extractLabel = foldl' go
+    extractLabel = L.foldl' go
     go :: Maybe Text -> Inline -> Maybe Text
     go (Just t) _ = Just t
     go Nothing (Span (_, _, attrs) _) = lookup "label" attrs

@@ -102,6 +102,14 @@ tests = let
       def
       "pptx/two-column/text-and-image/input.native"
       "pptx/two-column/text-and-image/output.pptx"
+    , pptxTests "single column text"
+      def
+      "pptx/single-column/text/input.native"
+      "pptx/single-column/text/output.pptx"
+    , pptxTests "single column image"
+      def
+      "pptx/single-column/image/input.native"
+      "pptx/single-column/image/output.pptx"
     , pptxTests "speaker notes"
       def
       "pptx/speaker-notes/input.native"
@@ -118,6 +126,10 @@ tests = let
       def
       "pptx/speaker-notes-after-metadata/input.native"
       "pptx/speaker-notes-after-metadata/output.pptx"
+    , pptxTests "speaker notes from metadata field"
+      def
+      "pptx/metadata-speaker-notes/input.native"
+      "pptx/metadata-speaker-notes/output.pptx"
     , pptxTests "remove empty slides"
       def
       "pptx/remove-empty-slides/input.native"
@@ -268,5 +280,17 @@ tests = let
       def {writerReferenceDoc = Just "pptx/reference-deleted-layouts.pptx"}
       "pptx/layouts/input.native"
       "pptx/layouts/deleted.pptx"
+    , ooxmlTest
+      writePowerpoint
+      "Slides can be missing from the reference doc"
+      def {writerReferenceDoc = Just "pptx/reference-no-slides.pptx"}
+      "pptx/reference-no-slides/add-slides/input.native"
+      "pptx/reference-no-slides/add-slides/output.pptx"
+    , ooxmlTest
+      writePowerpoint
+      "Notes are placed at the right position with a reference doc without slides"
+      def {writerReferenceDoc = Just "pptx/reference-no-slides.pptx"}
+      "pptx/reference-no-slides/with-notes/input.native"
+      "pptx/reference-no-slides/with-notes/output.pptx"
     ]
   in regularTests <> referenceSpecificTests

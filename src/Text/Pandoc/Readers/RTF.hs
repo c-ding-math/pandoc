@@ -20,7 +20,7 @@ import qualified Data.Sequence as Seq
 import Control.Monad
 import Control.Monad.Except (throwError)
 import Crypto.Hash (hashWith, SHA1(SHA1))
-import Data.List (find, foldl')
+import qualified Data.List as L
 import Data.Word (Word8, Word16)
 import Data.Default
 import Data.Text (Text)
@@ -558,8 +558,9 @@ processTok bs (Tok pos tok') = do
                                     TableRow (curCell : cs) : rs
                                   [] -> [TableRow [curCell]] -- shouldn't happen
                            , sCurrentCell = mempty }
-    ControlWord "intbl" _ ->
-      emitBlocks bs <* modifyGroup (\g -> g{ gInTable = True })
+    ControlWord "intbl" _ -> do
+      ls <- closeLists 0 -- see #11364
+      ((ls <>) <$> emitBlocks bs) <* modifyGroup (\g -> g{ gInTable = True })
     ControlWord "plain" _ -> bs <$ modifyGroup (const def)
     ControlWord "lquote" _ -> bs <$ addText "\x2018"
     ControlWord "rquote" _ -> bs <$ addText "\x2019"
@@ -627,9 +628,10 @@ processTok bs (Tok pos tok') = do
       modifyGroup (\g -> g{ gUnderline = boolParam mbp })
     ControlWord "ulnone" _ -> bs <$
       modifyGroup (\g -> g{ gUnderline = False })
-    ControlWord "pard" _ -> bs <$ do
+    ControlWord "pard" _ -> do
+      newbs <- emitBlocks bs
       modifyGroup (const def)
-      getStyleFormatting 0 >>= foldM processTok bs
+      getStyleFormatting 0 >>= foldM processTok newbs
     ControlWord "par" _ -> emitBlocks bs
     _ -> pure bs
 
@@ -784,26 +786,47 @@ removeCommonFormatting =
 
 -- {\field{\*\fldinst{HYPERLINK "http://pandoc.org"}}{\fldrslt foo}}
 handleField :: PandocMonad m => Blocks -> [Tok] -> RTFParser m Blocks
-handleField bs
-  (Tok _
-    (Grouped
-     (Tok _ (ControlSymbol '*')
-     :Tok _ (ControlWord "fldinst" Nothing)
-     :Tok _ (Grouped (Tok _ (UnformattedText insttext):rest))
-     :_))
-  :linktoks)
-  | Just linkdest <- getHyperlink insttext
-  = do let linkdest' = case rest of
-                         (Tok _ (ControlSymbol '\\')
-                          : Tok _ (UnformattedText t)
-                          : _) | Just bkmrk <- T.stripPrefix "l" t
-                           -> "#" <> unquote bkmrk
-                         _ -> linkdest
-       modifyGroup $ \g -> g{ gHyperlink = Just linkdest' }
-       result <- foldM processTok bs linktoks
-       modifyGroup $ \g -> g{ gHyperlink = Nothing }
-       return result
-handleField bs _ = pure bs
+handleField bs ts = do
+  let isFieldMod (Tok _ (ControlWord w _)) =
+        w `elem` ["flddirty", "fldedit", "fldlock", "fldpriv"]
+      isFieldMod _ = False
+
+  let instructionTokens (Tok _ (Grouped toks)) = Just toks
+      instructionTokens unformattedTok@(Tok _ (UnformattedText _)) = Just [unformattedTok]
+      instructionTokens _ = Nothing
+  case dropWhile isFieldMod ts of
+    [Tok _ (Grouped
+       (Tok _ (ControlSymbol '*')
+       :Tok _ (ControlWord "fldinst" Nothing)
+       :instrtoks
+       :_)),
+     Tok _ (Grouped
+       (Tok _ (ControlWord "fldrslt" Nothing)
+       :resulttoks))] -> do
+         case instructionTokens instrtoks of
+           Nothing -> pure bs
+           Just instrtoks' ->
+             case getHyperlink instrtoks' of
+               Just linkdest -> do
+                 modifyGroup $ \g -> g{ gHyperlink = Just linkdest }
+                 result <- foldM processTok bs resulttoks
+                 modifyGroup $ \g -> g{ gHyperlink = Nothing }
+                 return result
+               Nothing -> foldM processTok bs resulttoks
+    _ -> pure bs
+
+getHyperlink :: [Tok] -> Maybe Text
+getHyperlink [] = Nothing
+getHyperlink (Tok _ (UnformattedText w) : rest)
+  | Just w' <- unquote <$> T.stripPrefix "HYPERLINK" (T.strip w)
+    = if T.null w'
+         then case rest of
+                (Tok _ (ControlSymbol '\\') : Tok _ (UnformattedText b) : _)
+                  | Just bkmrk <- unquote <$> T.stripPrefix "l " (T.strip b)
+                    -> Just $ "#" <> bkmrk
+                _ -> Just mempty
+         else Just w'
+getHyperlink (_:ts) = getHyperlink ts
 
 unquote :: Text -> Text
 unquote = T.dropWhile (=='"') . T.dropWhileEnd (=='"') . T.strip
@@ -881,7 +904,7 @@ parseStyle (Tok _ (Grouped toks)) = do
                   _ -> mempty
   let isBasedOn (Tok _ (ControlWord "sbasedon" (Just _))) = True
       isBasedOn _ = False
-  let styBasedOn = case find isBasedOn toks of
+  let styBasedOn = case L.find isBasedOn toks of
                      Just (Tok _ (ControlWord "sbasedon" (Just i))) -> Just i
                      _ -> Nothing
   let isStyleControl (Tok _ (ControlWord x _)) =
@@ -906,7 +929,7 @@ hexToWord t = case TR.hexadecimal t of
 
 handlePict :: PandocMonad m => [Tok] -> RTFParser m ()
 handlePict toks = do
-  let pict = foldl' getPictData def toks
+  let pict = L.foldl' getPictData def toks
   let altText = "image"
   let bytes =
         if picBinary pict
@@ -944,14 +967,8 @@ handlePict toks = do
       _ -> pict
 
 
-getHyperlink :: Text -> Maybe Text
-getHyperlink t =
-  case T.stripPrefix "HYPERLINK" (T.strip t) of
-    Nothing -> Nothing
-    Just rest -> Just $ unquote rest
-
 processFontTable :: [Tok] -> FontTable
-processFontTable = snd . foldl' go (0, mempty)
+processFontTable = snd . L.foldl' go (0, mempty)
  where
   go (fontnum, tbl) (Tok _ tok') =
     case tok' of
@@ -964,7 +981,7 @@ processFontTable = snd . foldl' go (0, mempty)
      (ControlWord "fdecor" _) -> (fontnum, IntMap.insert fontnum Decor tbl)
      (ControlWord "ftech" _) -> (fontnum, IntMap.insert fontnum Tech tbl)
      (ControlWord "fbidi" _) -> (fontnum, IntMap.insert fontnum Bidi tbl)
-     (Grouped ts) -> foldl' go (fontnum, tbl) ts
+     (Grouped ts) -> L.foldl' go (fontnum, tbl) ts
      _ -> (fontnum, tbl)
 
 defaultAnsiWordToChar :: Word8 -> Char

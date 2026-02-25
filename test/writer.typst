@@ -1,13 +1,9 @@
 #let horizontalrule = line(start: (25%,0%), end: (75%,0%))
 
-#show terms: it => {
-  it.children
-    .map(child => [
-      #strong[#child.term]
-      #block(inset: (left: 1.5em, top: -0.4em))[#child.description]
-      ])
-    .join()
-}
+#show terms.item: it => block(breakable: false)[
+  #text(weight: "bold")[#it.term]
+  #block(inset: (left: 1.5em, top: -0.4em))[#it.description]
+]
 
 #set table(
   inset: 6pt,
@@ -39,75 +35,105 @@
   authors: (),
   keywords: (),
   date: none,
+  abstract-title: none,
   abstract: none,
+  thanks: none,
   cols: 1,
   margin: (x: 1.25in, y: 1.25in),
   paper: "us-letter",
   lang: "en",
   region: "US",
-  font: (),
+  font: none,
   fontsize: 11pt,
+  mathfont: none,
+  codefont: none,
+  linestretch: 1,
   sectionnumbering: none,
+  linkcolor: none,
+  citecolor: none,
+  filecolor: none,
   pagenumbering: "1",
   doc,
 ) = {
   set document(
     title: title,
-    author: authors.map(author => content-to-string(author.name)),
     keywords: keywords,
   )
+  set document(
+      author: authors.map(author => content-to-string(author.name)).join(", ", last: " & "),
+  ) if authors != none and authors != ()
   set page(
     paper: paper,
     margin: margin,
     numbering: pagenumbering,
-    columns: cols,
-    )
-  set par(justify: true)
+    columns: cols
+  )
+
+  set par(
+    justify: true,
+    leading: linestretch * 0.65em
+  )
   set text(lang: lang,
            region: region,
-           font: font,
            size: fontsize)
+
+  set text(font: font) if font != none
+  show math.equation: set text(font: mathfont) if mathfont != none
+  show raw: set text(font: codefont) if codefont != none
+
   set heading(numbering: sectionnumbering)
 
-  place(top, float: true, scope: "parent", clearance: 4mm)[
-  #if title != none {
-    align(center)[#block(inset: 2em)[
-      #text(weight: "bold", size: 1.5em)[#title]
-      #(if subtitle != none {
-        parbreak()
-        text(weight: "bold", size: 1.25em)[#subtitle]
-      })
-    ]]
+  show link: set text(fill: rgb(content-to-string(linkcolor))) if linkcolor != none
+  show ref: set text(fill: rgb(content-to-string(citecolor))) if citecolor != none
+  show link: this => {
+    if filecolor != none and type(this.dest) == label {
+      text(this, fill: rgb(content-to-string(filecolor)))
+    } else {
+      text(this)
+    }
   }
 
-  #if authors != none and authors != [] {
-    let count = authors.len()
-    let ncols = calc.min(count, 3)
-    grid(
-      columns: (1fr,) * ncols,
-      row-gutter: 1.5em,
-      ..authors.map(author =>
-          align(center)[
-            #author.name \
-            #author.affiliation \
-            #author.email
-          ]
+  place(top, float: true, scope: "parent", clearance: 4mm, block(below: 1em, width: 100%)[
+    #if title != none {
+      align(center, block[
+          #text(weight: "bold", size: 1.5em, hyphenate: false)[#title #if thanks != none {
+              footnote(thanks, numbering: "*")
+              counter(footnote).update(n => n - 1)
+            }]
+          #(
+            if subtitle != none {
+              parbreak()
+              text(weight: "bold", size: 1.25em, hyphenate: false)[#subtitle]
+            }
+           )])
+    }
+
+    #if authors != none and authors != [] {
+      let count = authors.len()
+      let ncols = calc.min(count, 3)
+      grid(
+        columns: (1fr,) * ncols,
+        row-gutter: 1.5em,
+        ..authors.map(author => align(center)[
+          #author.name \
+          #author.affiliation \
+          #author.email
+        ])
       )
-    )
-  }
+    }
 
-  #if date != none {
-    align(center)[#block(inset: 1em)[
-      #date
-    ]]
-  }
+    #if date != none {
+      align(center)[#block(inset: 1em)[
+          #date
+        ]]
+    }
 
-  #if abstract != none {
-    block(inset: 2em)[
-    #text(weight: "semibold")[Abstract] #h(1em) #abstract
-    ]
-  }
-  ]
+    #if abstract != none {
+      block(inset: 2em)[
+        #text(weight: "semibold")[#abstract-title] #h(1em) #abstract
+      ]
+    }
+  ])
 
   doc
 }
@@ -122,6 +148,7 @@
       email: "" ),
     ),
   date: [July 17, 2006],
+  abstract-title: [Abstract],
   pagenumbering: "1",
   cols: 1,
   doc,
@@ -167,8 +194,7 @@ item.
 
 Here's one with a bullet. \* criminey.
 
-There should be a hard line break \
-here.
+There should be a hard line break \ here.
 
 #horizontalrule
 
@@ -459,13 +485,13 @@ yellow fruit
 
 Multiple blocks with italics:
 
-/ #emph[apple];: #block[
+/ #emph[apple]: #block[
 red fruit
 
 contains seeds, crisp, pleasant to taste
 ]
 
-/ #emph[orange];: #block[
+/ #emph[orange]: #block[
 orange fruit
 
 ```
@@ -597,27 +623,27 @@ Hr's:
 
 = Inline Markup
 <inline-markup>
-This is #emph[emphasized];, and so #emph[is this];.
+This is #emph[emphasized], and so #emph[is this].
 
-This is #strong[strong];, and so #strong[is this];.
+This is #strong[strong], and so #strong[is this].
 
-An #emph[#link("/url")[emphasized link];];.
+An #emph[#link("/url")[emphasized link]].
 
-#strong[#emph[This is strong and em.];]
+#strong[#emph[This is strong and em.]]
 
-So is #strong[#emph[this];] word.
+So is #strong[#emph[this]] word.
 
-#strong[#emph[This is strong and em.];]
+#strong[#emph[This is strong and em.]]
 
-So is #strong[#emph[this];] word.
+So is #strong[#emph[this]] word.
 
 This is code: `>`, `$`, `\`, `\$`, `<html>`.
 
-#strike[This is #emph[strikeout];.]
+#strike[This is #emph[strikeout].]
 
-Superscripts: a#super[bc];d a#super[#emph[hello];] a#super[hello~there];.
+Superscripts: a#super[bc]d a#super[#emph[hello]] a#super[hello~there].
 
-Subscripts: H#sub[2];O, H#sub[23];O, H#sub[many~of~them];O.
+Subscripts: H#sub[2]O, H#sub[23]O, H#sub[many~of~them]O.
 
 These should not be superscripts or subscripts, because of the unescaped spaces:
 a^b c^d, a\~b c\~d.
@@ -635,7 +661,7 @@ a^b c^d, a\~b c\~d.
 'He said, "I want to go."' Were you alive in the 70's?
 
 Here is some quoted '`code`' and a
-"#link("http://example.com/?foo=1&bar=2")[quoted link];".
+"#link("http://example.com/?foo=1&bar=2")[quoted link]".
 
 Some dashes: one---two --- three---four --- five.
 
@@ -727,13 +753,13 @@ Minus: -
 <links>
 == Explicit
 <explicit>
-Just a #link("/url/")[URL];.
+Just a #link("/url/")[URL].
 
-#link("/url/")[URL and title];.
+#link("/url/")[URL and title].
 
-#link("/url/")[URL and title];.
+#link("/url/")[URL and title].
 
-#link("/url/")[URL and title];.
+#link("/url/")[URL and title].
 
 #link("/url/")[URL and title]
 
@@ -743,21 +769,21 @@ Just a #link("/url/")[URL];.
 
 #link("mailto:nobody@nowhere.net")[Email link]
 
-#link("")[Empty];.
+#link("")[Empty].
 
 == Reference
 <reference>
-Foo #link("/url/")[bar];.
+Foo #link("/url/")[bar].
 
-With #link("/url/")[embedded \[brackets\]];.
+With #link("/url/")[embedded \[brackets\]].
 
 #link("/url/")[b] by itself should be a link.
 
-Indented #link("/url")[once];.
+Indented #link("/url")[once].
 
-Indented #link("/url")[twice];.
+Indented #link("/url")[twice].
 
-Indented #link("/url")[thrice];.
+Indented #link("/url")[thrice].
 
 This should \[not\]\[\] be a link.
 
@@ -765,20 +791,20 @@ This should \[not\]\[\] be a link.
 [not]: /url
 ```
 
-Foo #link("/url/")[bar];.
+Foo #link("/url/")[bar].
 
-Foo #link("/url/")[biz];.
+Foo #link("/url/")[biz].
 
 == With ampersands
 <with-ampersands>
 Here's a
-#link("http://example.com/?foo=1&bar=2")[link with an ampersand in the URL];.
+#link("http://example.com/?foo=1&bar=2")[link with an ampersand in the URL].
 
-Here's a link with an amersand in the link text: #link("http://att.com/")[AT&T];.
+Here's a link with an amersand in the link text: #link("http://att.com/")[AT&T].
 
-Here's an #link("/script?foo=1&bar=2")[inline link];.
+Here's an #link("/script?foo=1&bar=2")[inline link].
 
-Here's an #link("/script?foo=1&bar=2")[inline link in pointy braces];.
+Here's an #link("/script?foo=1&bar=2")[inline link in pointy braces].
 
 == Autolinks
 <autolinks>
@@ -806,13 +832,13 @@ or here: <http://example.com/>
 <images>
 From "Voyage dans la Lune" by Georges Melies (1902):
 
-#figure(image("lalune.jpg"),
+#figure(image("lalune.jpg", alt: "lalune"),
   caption: [
     lalune
   ]
 )
 
-Here is a movie #box(image("movie.jpg")) icon.
+Here is a movie #box(image("movie.jpg", alt: "movie")) icon.
 
 #horizontalrule
 

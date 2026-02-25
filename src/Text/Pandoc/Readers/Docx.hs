@@ -74,7 +74,8 @@ import Control.Monad.State.Strict
 import Data.Bifunctor (bimap, first)
 import qualified Data.ByteString.Lazy as B
 import Data.Default (Default)
-import Data.List (delete, intersect, foldl')
+import Data.List (delete, intersect)
+import qualified Data.List as L
 import Data.Char (isSpace)
 import qualified Data.Map as M
 import qualified Data.Text as T
@@ -305,7 +306,8 @@ runStyleToTransform rPr' = do
             emph . go rPr{isItalic = Nothing, isItalicCTL = Nothing}
         | Just True <- bold rPr =
             strong . go rPr{isBold = Nothing, isBoldCTL = Nothing}
-        | Just _ <- rHighlight rPr =
+        | Just v <- rHighlight rPr
+        , v /= "none" =
             spanWith ("",["mark"],[]) . go rPr{rHighlight = Nothing}
         | Just True <- isSmallCaps rPr =
             smallcaps . go rPr{isSmallCaps = Nothing}
@@ -481,6 +483,7 @@ parPartToInlines' (Field info children) =
                           ++ [("bold","") | entryBold ie]
                           ++ [("italic","") | entryItalic ie])) mempty
     PagerefField fieldAnchor True -> parPartToInlines' $ InternalHyperLink fieldAnchor children
+    CrossrefField fieldAnchor True -> parPartToInlines' $ InternalHyperLink fieldAnchor children
     EndNoteCite t -> do
       formattedCite <- smushInlines <$> mapM parPartToInlines' children
       opts <- asks docxOptions
@@ -623,8 +626,8 @@ rowsToRows rows = do
 splitHeaderRows :: Bool -> [Docx.Row] -> ([Docx.Row], [Docx.Row])
 splitHeaderRows hasFirstRowFormatting rs = bimap reverse reverse $ fst
   $ if hasFirstRowFormatting
-    then foldl' f ((take 1 rs, []), True) (drop 1 rs)
-    else foldl' f (([], []), False) rs
+    then L.foldl' f ((take 1 rs, []), True) (drop 1 rs)
+    else L.foldl' f (([], []), False) rs
   where
     f ((headerRows, bodyRows), previousRowWasHeader) r@(Docx.Row h cs)
       | h == HasTblHeader || (previousRowWasHeader && any isContinuationCell cs)
@@ -809,6 +812,8 @@ bodyPartToBlocks (Captioned parstyle parparts bpart) = do
           -> singleton $ Figure attr' capt [Plain im]
         [Div attr bls']
           -> toCaptioned (attr <> attr') bls'
+        [BlockQuote bls']
+          -> toCaptioned attr' bls'
         _ -> captContents
   pure $ toCaptioned nullAttr (toList bs)
 bodyPartToBlocks (Tbl _ _ _ _ []) =
@@ -832,8 +837,9 @@ bodyPartToBlocks (Tbl mbsty cap grid look parts) = do
       alignments = case rows of
                      [] -> replicate width Pandoc.AlignDefault
                      Docx.Row _ cs : _ -> concatMap getAlignment cs
-      totalWidth = sum grid
-      widths = (\w -> ColWidth (fromInteger w / fromInteger totalWidth)) <$> grid
+      widths = map (\n -> if n == 0
+                             then ColWidthDefault
+                             else ColWidth n) grid
 
   extStylesEnabled <- asks (isEnabled Ext_styles . docxOptions)
   let attr = case mbsty of

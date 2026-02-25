@@ -8,7 +8,8 @@ permissions:
 jobs:
   windows:
 
-    runs-on: windows-2019
+    runs-on: windows-2022
+    timeout-minutes: 120
     strategy:
       fail-fast: true
       matrix:
@@ -18,11 +19,11 @@ jobs:
             cabal_opts: '-fembed_data_files -fserver -flua'
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
     - name: Install ghc
       run: |
-        ghcup install ghc --set 9.8
-        ghcup install cabal --set 3.12
+        ghcup install ghc --set 9.10
+        ghcup install cabal --set 3.14
 
     - name: Install dependencies
       run: |
@@ -63,24 +64,46 @@ jobs:
           %WIXBIN%\candle -arch ${{ matrix.versions.arch }} -dVERSION=%VERSION% -dBINPATH=%RELEASE% *.wxs -out wixobj\
           if %errorlevel% neq 0 exit /b %errorlevel%
           echo Running light...
-          %WIXBIN%\light -sw1076 -ext WixUIExtension -ext WixUtilExtension -cultures:en-us -loc Pandoc-en-us.wxl -out %WORKDIR%\pandoc-%VERSION%-${{ matrix.versions.osarch }}-UNSIGNED.msi wixobj\*.wixobj
+          %WIXBIN%\light -sw1076 -ext WixUIExtension -ext WixUtilExtension -cultures:en-us -loc Pandoc-en-us.wxl -out %WORKDIR%\pandoc-%VERSION%-${{ matrix.versions.osarch }}.msi wixobj\*.wixobj
           7z a "pandoc-%VERSION%-${{ matrix.versions.osarch }}.zip" pandoc-%VERSION%
           cd ..
           mkdir windows-release-candidate
-          copy windows\pandoc-%VERSION%-${{ matrix.versions.osarch }}-UNSIGNED.msi windows-release-candidate
+          copy windows\pandoc-%VERSION%-${{ matrix.versions.osarch }}.msi windows-release-candidate
           copy windows\pandoc-%VERSION%-${{ matrix.versions.osarch }}.zip windows-release-candidate
-          copy windows\Makefile windows-release-candidate
-    - uses: actions/upload-artifact@v4
+    - name: Upload unsigned artifact
+      id: upload-unsigned-artifact
+      uses: actions/upload-artifact@v6
       with:
-        name: windows-release-candidate
+        name: windows-release-candidate-unsigned
+        path: windows-release-candidate
+
+    - name: Sign artifact
+      id: sign-artifact
+      uses: signpath/github-action-submit-signing-request@v2
+      with:
+        api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
+        organization-id: 'd330f023-29aa-44e4-b90b-ae1c570f4a25'
+        project-slug: 'pandoc'
+        signing-policy-slug: 'release-signing'
+        artifact-configuration-slug: 'pandoc-msi-and-zip'
+        github-artifact-id: '${{ steps.upload-unsigned-artifact.outputs.artifact-id }}'
+        wait-for-completion: true
+        output-artifact-directory: 'windows-release-candidate'
+      timeout-minutes: 120
+
+    - name: upload-signed-artifact
+      id: upload-signed-artifact
+      uses: actions/upload-artifact@v6
+      with:
+        name: windows-release-candidate-signed
         path: windows-release-candidate
 
   macos:
 
-    runs-on: macos-13
+    runs-on: macos-15-intel
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
 
     - name: Install ghcup
       run: |
@@ -88,31 +111,61 @@ jobs:
 
     - name: Install ghc and cabal
       run: |
-        ghcup install ghc --set 9.8
-        ghcup install cabal --set 3.12
+        ghcup install ghc --set 9.10
+        ghcup install cabal --set 3.14
         echo "$HOME/.ghcup/bin" >> "${GITHUB_PATH}"
 
     - name: Create release
       run: |
         sh macos/make_macos_release.sh
 
-    - uses: actions/upload-artifact@v4
+    - uses: actions/upload-artifact@v6
       with:
         name: macos-x86_64
         path: macos-x86_64
+
+  wasm:
+
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+    steps:
+    - uses: actions/checkout@v6
+    - uses: wimpysworld/nothing-but-nix@v10
+      with:
+       hatchet-protocol: 'rampage'
+    - uses: cachix/install-nix-action@v31
+      with:
+        nix_path: nixpkgs=channel:nixos-unstable
+    - name: Cache cabal work
+      id:   cabal-local
+      uses: actions/cache@v5
+      with:
+        path: |
+          dist-newstyle
+        key: ${{ runner.os }}-nix-cabal-local-${{ secrets.CACHE_VERSION }}
+    - name: Build pandoc.wasm
+      run: |
+        nix develop --command bash -c "make pandoc.wasm"
+    - name: Upload artifact
+      uses: actions/upload-artifact@v6
+      with:
+        name: pandoc.wasm
+        path: pandoc.wasm
+
 
 # linux:
 
 #   runs-on: ubuntu-latest
 #   steps:
-#   - uses: actions/checkout@v4
+#   - uses: actions/checkout@v6
 #   - name: Create linux package
 #     run: |
 #         make debpkg
 #         mkdir linux-release-candidate
 #         cp linux/artifacts/*.deb linux-release-candidate/
 #         cp linux/artifacts/*.tar.gz linux-release-candidate/
-#   - uses: actions/upload-artifact@v4
+#   - uses: actions/upload-artifact@v6
 #     with:
 #       name: linux-release-candidate
 #       path: linux-release-candidate

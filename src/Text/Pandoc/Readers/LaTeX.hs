@@ -52,8 +52,8 @@ import Text.Pandoc.Parsing hiding (blankline, many, mathDisplay, mathInline,
 import Text.Pandoc.TeX (Tok (..), TokType (..))
 import Text.Pandoc.Readers.LaTeX.Parsing
 import Text.Pandoc.Readers.LaTeX.Citation (citationCommands, cites)
-import Text.Pandoc.Readers.LaTeX.Math (dollarsMath, inlineEnvironments,
-                                       inlineEnvironment,
+import Text.Pandoc.Readers.LaTeX.Math (withMathMode, dollarsMath,
+                                       inlineEnvironments, inlineEnvironment,
                                        mathDisplay, mathInline,
                                        newtheorem, theoremstyle, proof,
                                        theoremEnvironment)
@@ -110,6 +110,7 @@ parseLaTeX = do
        (if bottomLevel < 1
            then walk (adjustHeaders (1 - bottomLevel))
            else id) $
+       walk (resolveFootnoteMarks (sFootnoteTexts st)) $
        walk (resolveRefs (sLabels st)) doc'
   return $ Pandoc meta bs'
 
@@ -123,6 +124,18 @@ resolveRefs labels x@(Link (ident,classes,kvs) _ _) =
                Nothing  -> x
         _ -> x
 resolveRefs _ x = x
+
+-- | Resolve footnote marks (\footnotemark) to actual notes using
+-- the footnote texts collected from \footnotetext commands.
+resolveFootnoteMarks :: M.Map Int Blocks -> Inline -> Inline
+resolveFootnoteMarks fnTexts (Span (_, classes, kvs) _)
+  | "footnote-mark" `elem` classes
+  , Just numText <- lookup "note-num" kvs
+  , [(n, "")] <- reads (T.unpack numText)
+  = case M.lookup n fnTexts of
+      Just contents -> Note (toList contents)
+      Nothing       -> Str ""  -- No matching footnotetext found
+resolveFootnoteMarks _ x = x
 
 
 -- testParser :: LP PandocIO a -> Text -> IO a
@@ -144,15 +157,27 @@ rawLaTeXBlock = do
   toks <- getInputTokens
   snd <$> (
           rawLaTeXParser toks
-             (macroDef (const mempty) <|>
+             (makeAtLetterSection <|>
+              macroDef (const mempty) <|>
               do choice (map controlSeq
                    ["include", "input", "subfile", "usepackage"])
                  skipMany opt
                  braced
                  return mempty) blocks
       <|> rawLaTeXParser toks
-           (environment <|> blockCommand)
+           (void (environment <|> blockCommand))
            (mconcat <$> many (block <|> beginOrEndCommand)))
+
+makeAtLetterSection :: PandocMonad m => LP m ()
+makeAtLetterSection = try $ do
+  controlSeq "makeatletter"
+  void $ manyTill
+    (   whitespace
+    <|> newlineTok
+    <|> macroDef (const ())
+    <|> void environment
+    <|> void blockCommand
+    ) (controlSeq "makeatother")
 
 -- See #4667 for motivation; sometimes people write macros
 -- that just evaluate to a begin or end command, which blockCommand
@@ -177,8 +202,7 @@ rawLaTeXInline = do
           (   rawLaTeXParser toks
               (mempty <$ (controlSeq "input" >> skipMany rawopt >> braced))
               inlines
-          <|> rawLaTeXParser toks (inlineEnvironment <|> inlineCommand')
-              inlines
+          <|> rawLaTeXParser toks (void inline) inlines
           )
   finalbraces <- mconcat <$> many (try (string "{}")) -- see #5439
   return $ raw <> T.pack finalbraces
@@ -187,7 +211,7 @@ inlineCommand :: PandocMonad m => ParsecT Sources ParserState m Inlines
 inlineCommand = do
   lookAhead (try (char '\\' >> letter))
   toks <- getInputTokens
-  fst <$> rawLaTeXParser toks (inlineEnvironment <|> inlineCommand')
+  fst <$> rawLaTeXParser toks (void (inlineEnvironment <|> inlineCommand'))
           inlines
 
 -- inline elements:
@@ -371,9 +395,11 @@ inlineCommands = M.unions
     , ("hbox", rawInlineOr "hbox" $ processHBox <$> tok)
     , ("vbox", rawInlineOr "vbox" tok)
     , ("lettrine", rawInlineOr "lettrine" lettrine)
-    , ("(", mathInline . untokenize <$> manyTill anyTok (controlSeq ")"))
-    , ("[", mathDisplay . untokenize <$> manyTill anyTok (controlSeq "]"))
-    , ("ensuremath", mathInline . untokenize <$> braced)
+    , ("(", withMathMode
+        (mathInline . untokenize <$> manyTill anyTok (controlSeq ")")))
+    , ("[", withMathMode
+        (mathDisplay . untokenize <$> manyTill anyTok (controlSeq "]")))
+    , ("ensuremath", withMathMode (mathInline . untokenize <$> braced))
     , ("texorpdfstring", const <$> tok <*> tok)
     -- old TeX commands
     , ("em", extractSpaces emph <$> inlines)
@@ -394,8 +420,9 @@ inlineCommands = M.unions
     , ("lowercase", makeLowercase <$> tok)
     , ("thanks", skipopts >> note <$> grouped block)
     , ("footnote", skipopts >> footnote)
+    , ("footnotemark", footnotemark)
+    , ("footnotetext", footnotetext)
     , ("newline", pure B.linebreak)
-    , ("linebreak", pure B.linebreak)
     , ("passthrough", fixPassthroughEscapes <$> tok)
     -- \passthrough macro used by latex writer
                            -- for listings
@@ -424,7 +451,6 @@ inlineCommands = M.unions
     , ("textcolor", coloredInline "color")
     , ("colorbox", coloredInline "background-color")
     -- etoolbox
-    , ("ifstrequal", ifstrequal)
     , ("newtoggle", braced >>= newToggle)
     , ("toggletrue", braced >>= setToggle True)
     , ("togglefalse", braced >>= setToggle False)
@@ -442,6 +468,9 @@ inlineCommands = M.unions
     , ("ifdim", ifdim)
     -- generally only used in \date
     , ("today", today)
+    -- this is used internally by pandoc but the definition is too complicated
+    -- for pandoc to handle (see #11140):
+    , ("pandocbounded", tok)
     ]
 
 bracedFilename :: PandocMonad m => LP m Text
@@ -462,6 +491,39 @@ footnote = do
   updateState $ \st -> st{ sLastNoteNum = sLastNoteNum st + 1 }
   contents <- grouped block >>= walkM resolveNoteLabel
   return $ note contents
+
+-- | Parse \footnotemark[n]. If n is not given, increment the counter.
+-- Returns a span marker that will be resolved to a Note later.
+footnotemark :: PandocMonad m => LP m Inlines
+footnotemark = do
+  mbNum <- optionalFootnoteNum
+  noteNum <- case mbNum of
+    Just n  -> return n
+    Nothing -> do
+      updateState $ \st -> st{ sLastNoteNum = sLastNoteNum st + 1 }
+      sLastNoteNum <$> getState
+  return $ B.spanWith ("", ["footnote-mark"], [("note-num", tshow noteNum)]) mempty
+
+-- | Parse \footnotetext[n]{text}. If n is not given, use current counter.
+-- Stores the text in state to be resolved later.
+footnotetext :: PandocMonad m => LP m Inlines
+footnotetext = do
+  mbNum <- optionalFootnoteNum
+  noteNum <- case mbNum of
+    Just n  -> return n
+    Nothing -> sLastNoteNum <$> getState
+  contents <- grouped block >>= walkM resolveNoteLabel
+  updateState $ \st -> st{
+    sFootnoteTexts = M.insert noteNum contents (sFootnoteTexts st) }
+  return mempty
+
+-- | Parse optional footnote number argument [n]
+optionalFootnoteNum :: PandocMonad m => LP m (Maybe Int)
+optionalFootnoteNum = option Nothing $ do
+  t <- bracketedToks
+  case reads (T.unpack $ untokenize t) of
+    [(n, "")] -> return $ Just n
+    _         -> return Nothing
 
 resolveNoteLabel :: PandocMonad m => Inline -> LP m Inline
 resolveNoteLabel (Span (_,cls,kvs) _)
@@ -560,18 +622,6 @@ ifToggle = do
                   pos <- getPosition
                   report $ UndefinedToggle name' pos
   return ()
-
-ifstrequal :: (PandocMonad m, Monoid a) => LP m a
-ifstrequal = do
-  str1 <- tok
-  str2 <- tok
-  ifequal <- withVerbatimMode braced
-  ifnotequal <- withVerbatimMode braced
-  TokStream _ ts <- getInput
-  if str1 == str2
-     then setInput $ TokStream False (ifequal ++ ts)
-     else setInput $ TokStream False (ifnotequal ++ ts)
-  return mempty
 
 coloredInline :: PandocMonad m => Text -> LP m Inlines
 coloredInline stylename = do
@@ -961,6 +1011,7 @@ blockCommands = M.fromList
    , ("paragraph*", section ("",["unnumbered"],[]) 4)
    , ("subparagraph", section nullAttr 5)
    , ("subparagraph*", section ("",["unnumbered"],[]) 5)
+   , ("minisec", section ("",["unnumbered","unlisted"],[]) 6) -- from KOMA
    -- beamer slides
    , ("frametitle", section nullAttr 3)
    , ("framesubtitle", section nullAttr 4)
@@ -1019,6 +1070,11 @@ blockCommands = M.fromList
    , ("epigraph", epigraph)
    -- alignment
    , ("raggedright", pure mempty)
+   -- etoolbox
+   , ("newtoggle", braced >>= newToggle)
+   , ("toggletrue", braced >>= setToggle True)
+   , ("togglefalse", braced >>= setToggle False)
+   , ("iftoggle", try $ ifToggle >> block)
    ]
 
 skipSameFileToks :: PandocMonad m => LP m ()
@@ -1035,8 +1091,8 @@ environments = M.union (tableEnvironments block inline) $
    , ("letter", env "letter" letterContents)
    , ("minipage", divWith ("",["minipage"],[]) <$>
        env "minipage" (skipopts *> spaces *> optional braced *> spaces *> blocks))
-   , ("figure", env "figure" $ skipopts *> figure')
-   , ("figure*", env "figure*" $ skipopts *> figure')
+   , ("figure", env "figure" figure')
+   , ("figure*", env "figure*" figure')
    , ("subfigure", env "subfigure" $ skipopts *> tok *> figure')
    , ("center", divWith ("", ["center"], []) <$> env "center" blocks)
    , ("quote", blockQuote <$> env "quote" blocks)
@@ -1062,12 +1118,7 @@ environments = M.union (tableEnvironments block inline) $
    , ("ly", rawVerbEnv "ly")
    -- amsthm
    , ("proof", proof blocks opt)
-   -- etoolbox
-   , ("ifstrequal", ifstrequal)
-   , ("newtoggle", braced >>= newToggle)
-   , ("toggletrue", braced >>= setToggle True)
-   , ("togglefalse", braced >>= setToggle False)
-   , ("iftoggle", try $ ifToggle >> block)
+   -- other
    , ("CSLReferences", braced >> braced >> env "CSLReferences" blocks)
    , ("otherlanguage", env "otherlanguage" otherlanguageEnv)
    ]
@@ -1208,15 +1259,18 @@ letterContents = do
 
 figure' :: PandocMonad m => LP m Blocks
 figure' = try $ do
+  sp
+  poshint <- option "" $ untokenize <$> bracketedToks
+  sp
   resetCaption
   innerContent <- many $ try (Left <$> label) <|> (Right <$> block)
   let content = walk go $ mconcat $ snd $ partitionEithers innerContent
   st <- getState
   let caption' = fromMaybe B.emptyCaption $ sCaption st
   let mblabel  = sLastLabel st
-  let attr     = case mblabel of
-                   Just lab -> (lab, [], [])
-                   Nothing  -> nullAttr
+  let kvs = [("latex-placement", poshint) | not (T.null poshint)]
+  let ident = fromMaybe "" mblabel
+  let attr  = (ident, [], kvs)
   case mblabel of
     Nothing   -> pure ()
     Just lab  -> do

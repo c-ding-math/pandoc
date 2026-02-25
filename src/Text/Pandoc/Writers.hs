@@ -76,8 +76,16 @@ module Text.Pandoc.Writers
     , writeTexinfo
     , writeTextile
     , writeTypst
+    , writeXML
     , writeXWiki
     , writeZimWiki
+    , writeVimdoc
+    , writeBBCode
+    , writeBBCodeSteam
+    , writeBBCodeFluxBB
+    , writeBBCodePhpBB
+    , writeBBCodeHubzilla
+    , writeBBCodeXenforo
     , getWriter
     ) where
 
@@ -128,8 +136,18 @@ import Text.Pandoc.Writers.TEI
 import Text.Pandoc.Writers.Texinfo
 import Text.Pandoc.Writers.Textile
 import Text.Pandoc.Writers.Typst
+import Text.Pandoc.Writers.XML
 import Text.Pandoc.Writers.XWiki
 import Text.Pandoc.Writers.ZimWiki
+import Text.Pandoc.Writers.Vimdoc
+import Text.Pandoc.Writers.BBCode (
+  writeBBCode,
+  writeBBCodeFluxBB,
+  writeBBCodeHubzilla,
+  writeBBCodePhpBB,
+  writeBBCodeSteam,
+  writeBBCodeXenforo,
+ )
 
 data Writer m = TextWriter (WriterOptions -> Pandoc -> m Text)
               | ByteStringWriter (WriterOptions -> Pandoc -> m BL.ByteString)
@@ -203,6 +221,14 @@ writers = [
   ,("chunkedhtml"  , ByteStringWriter writeChunkedHTML)
   ,("djot"         , TextWriter writeDjot)
   ,("ansi"         , TextWriter writeANSI)
+  ,("xml"          , TextWriter writeXML)
+  ,("vimdoc"       , TextWriter writeVimdoc)
+  ,("bbcode"       , TextWriter writeBBCode)
+  ,("bbcode_steam" , TextWriter writeBBCodeSteam)
+  ,("bbcode_phpbb" , TextWriter writeBBCodePhpBB)
+  ,("bbcode_fluxbb", TextWriter writeBBCodeFluxBB)
+  ,("bbcode_hubzilla" , TextWriter writeBBCodeHubzilla)
+  ,("bbcode_xenforo" , TextWriter writeBBCodeXenforo)
   ]
 
 -- | Retrieve writer, extensions based on formatSpec (format+extensions).

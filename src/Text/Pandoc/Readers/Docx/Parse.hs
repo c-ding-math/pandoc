@@ -92,13 +92,13 @@ import Text.Pandoc.XML.Light
       filterChild,
       filterChildrenName,
       filterElementName,
+      filterElementsName,
       lookupAttrBy,
       parseXMLElement,
       elChildren,
       QName(QName, qName),
       Content(Elem),
-      Element(..),
-      findElements )
+      Element(..))
 
 data ReaderEnv = ReaderEnv { envNotes         :: Notes
                            , envComments      :: Comments
@@ -110,6 +110,7 @@ data ReaderEnv = ReaderEnv { envNotes         :: Notes
                            , envParStyles     :: ParStyleMap
                            , envLocation      :: DocumentLocation
                            , envDocXmlPath    :: FilePath
+                           , envTextWidth     :: Int
                            }
                deriving Show
 
@@ -151,46 +152,27 @@ mapD f xs =
   in
    concatMapM handler xs
 
-isAltContentRun :: NameSpaces -> Element -> Bool
-isAltContentRun ns element
-  | isElem ns "w" "r" element
-  , Just _altContentElem <- findChildByName ns "mc" "AlternateContent" element
-  = True
-  | otherwise
-  = False
-
--- Elements such as <w:shape> are not always preferred
--- to be unwrapped. Only if they are part of an AlternateContent
--- element, they should be unwrapped.
--- This strategy prevents VML images breaking.
-unwrapAlternateContentElement :: NameSpaces -> Element -> [Element]
-unwrapAlternateContentElement ns element
-  | isElem ns "mc" "AlternateContent" element
-  || isElem ns "mc" "Fallback" element
-  || isElem ns "w" "pict" element
-  || isElem ns "v" "group" element
-  || isElem ns "v" "rect" element
-  || isElem ns "v" "roundrect" element
-  || isElem ns "v" "shape" element
-  || isElem ns "v" "textbox" element
-  || isElem ns "w" "txbxContent" element
-  = concatMap (unwrapAlternateContentElement ns) (elChildren element)
-  | otherwise
-  = unwrapElement ns element
-
 unwrapElement :: NameSpaces -> Element -> [Element]
 unwrapElement ns element
   | isElem ns "w" "sdt" element
   , Just sdtContent <- findChildByName ns "w" "sdtContent" element
   = concatMap (unwrapElement ns) (elChildren sdtContent)
-  | isElem ns "w" "r" element
-  , Just alternateContentElem <- findChildByName ns "mc" "AlternateContent" element
-  = unwrapAlternateContentElement ns alternateContentElem
   | isElem ns "w" "smartTag" element
   = concatMap (unwrapElement ns) (elChildren element)
   | isElem ns "w" "p" element
-  , Just (modified, altContentRuns) <- extractChildren element (isAltContentRun ns)
-  = (unwrapElement ns modified) ++ concatMap (unwrapElement ns) altContentRuns
+  , textboxes@(_:_) <- findChildrenByName ns "w" "r" element >>=
+                       findChildrenByName ns "mc" "AlternateContent" >>=
+                       findChildrenByName ns "mc" "Fallback" >>=
+                       findChildrenByName ns "w" "pict" >>=
+                       (\e -> findChildrenByName ns "v" "shape" e <>
+                              findChildrenByName ns "v" "rect" e) >>=
+                       findChildrenByName ns "v" "textbox" >>=
+                       findChildrenByName ns "w" "txbxContent"
+  = concatMap (unwrapElement ns) (concatMap elChildren textboxes) -- handle #9214
+  | isElem ns "w" "r" element
+  , Just fallback <- findChildByName ns "mc" "AlternateContent" element >>=
+                     findChildByName ns "mc" "Fallback"
+  = [element{ elContent = concatMap (unwrapContent ns) (elContent fallback) }]
   | otherwise
   = [element{ elContent = concatMap (unwrapContent ns) (elContent element) }]
 
@@ -292,7 +274,7 @@ data BodyPart = Paragraph ParagraphStyle [ParPart]
               | HRule
               deriving Show
 
-type TblGrid = [Integer]
+type TblGrid = [Double]
 
 newtype TblLook = TblLook {firstRowFormatting::Bool}
               deriving Show
@@ -309,6 +291,9 @@ data Align = AlignDefault | AlignLeft | AlignRight | AlignCenter
 
 data Cell = Cell Align GridSpan VMerge [BodyPart]
             deriving Show
+
+emptyCell :: Cell
+emptyCell = Cell AlignDefault 1 Restart []
 
 type GridSpan = Integer
 
@@ -423,6 +408,7 @@ archiveToDocxWithWarnings archive = do
       rels      = archiveToRelationships archive docXmlPath
       media     = filteredFilesFromArchive archive filePathIsMedia
       (styles, parstyles) = archiveToStyles archive
+      textWidth = archiveToTextWidth archive
       rEnv = ReaderEnv { envNotes = notes
                        , envComments = comments
                        , envNumbering = numbering
@@ -433,6 +419,7 @@ archiveToDocxWithWarnings archive = do
                        , envParStyles = parstyles
                        , envLocation = InDocument
                        , envDocXmlPath = docXmlPath
+                       , envTextWidth = fromMaybe 9360 textWidth
                        }
       rState = ReaderState { stateWarnings = []
                            , stateFldCharState = []
@@ -453,8 +440,10 @@ getDocumentXmlPath zf = do
   entry <- findEntryByPath "_rels/.rels" zf
   relsElem <- parseXMLFromEntry entry
   let rels = filterChildrenName (\n -> qName n == "Relationship") relsElem
-  rel <- find (\e -> findAttr (QName "Type" Nothing Nothing) e ==
-                       Just "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument")
+  rel <- find (\e ->
+                 case findAttr (QName "Type" Nothing Nothing) e of
+                   Just u -> isNamespace "officeDocument" "relationships/officeDocument" u
+                   Nothing -> False)
          rels
   fp <- findAttr (QName "Target" Nothing Nothing) rel
   -- sometimes there will be a leading slash, which windows seems to
@@ -654,6 +643,20 @@ archiveToNumbering :: Archive -> Numbering
 archiveToNumbering archive =
   fromMaybe (Numbering mempty [] []) (archiveToNumbering' archive)
 
+archiveToTextWidth :: Archive -> Maybe Int
+archiveToTextWidth zf = do
+  entry <- findEntryByPath "word/document.xml" zf
+  docElem <- parseXMLFromEntry entry
+  let ns = elemToNameSpaces docElem
+  sectElem <- findChildByName ns "w" "body" docElem >>= findChildByName ns "w" "sectPr"
+  pgWidth <- findChildByName ns "w" "pgSz" sectElem
+               >>= findAttrByName ns "w" "w" >>= safeRead
+  pgMar <- findChildByName ns "w" "pgMar" sectElem
+  leftMargin <- findAttrByName ns "w" "left" pgMar >>= safeRead
+  rightMargin <- findAttrByName ns "w" "right" pgMar >>= safeRead
+  gutter <- findAttrByName ns "w" "gutter" pgMar >>= safeRead
+  return $ pgWidth - (leftMargin + rightMargin + gutter)
+
 elemToNotes :: NameSpaces -> Text -> Element -> Maybe (M.Map T.Text Element)
 elemToNotes ns notetype element
   | isElem ns "w" (notetype <> "s") element =
@@ -682,11 +685,20 @@ elemToComments _ _ = M.empty
 ---------------------------------------------
 
 elemToTblGrid :: NameSpaces -> Element -> D TblGrid
-elemToTblGrid ns element | isElem ns "w" "tblGrid" element =
+elemToTblGrid ns element | isElem ns "w" "tblGrid" element = do
   let cols = findChildrenByName ns "w" "gridCol" element
-  in
-   mapD (\e -> maybeToD (findAttrByName ns "w" "w" e >>= stringToInteger))
-   cols
+  textWidth <- asks envTextWidth
+  -- space between cols is 10 twips, so we subtract this:
+  let totalWidth = textWidth - (10 * (length cols - 1))
+  let toFraction :: Int -> Double
+      toFraction x = fromIntegral x / fromIntegral totalWidth
+  let normalizeFractions xs =
+        case sum xs of
+          tot | tot > 1.0 -> map (/ tot) xs
+          _ -> xs
+  normalizeFractions <$>
+    mapD (\e -> maybeToD (findAttrByName ns "w" "w" e >>=
+                          fmap toFraction . safeRead)) cols
 elemToTblGrid _ _ = throwError WrongElem
 
 elemToTblLook :: NameSpaces -> Element -> D TblLook
@@ -707,12 +719,18 @@ elemToTblLook _ _ = throwError WrongElem
 elemToRow :: NameSpaces -> Element -> D Row
 elemToRow ns element | isElem ns "w" "tr" element =
   do
+    let properties = findChildByName ns "w" "trPr" element
+    let gridBefore = properties
+                     >>= findChildByName ns "w" "gridBefore"
+                     >>= findAttrByName ns "w" "val"
+                     >>= stringToInteger
     let cellElems = findChildrenByName ns "w" "tc" element
+    let beforeCells = genericReplicate (fromMaybe 0 gridBefore) emptyCell
     cells <- mapD (elemToCell ns) cellElems
     let hasTblHeader = maybe NoTblHeader (const HasTblHeader)
-          (findChildByName ns "w" "trPr" element
+          (properties
            >>= findChildByName ns "w" "tblHeader")
-    return $ Row hasTblHeader cells
+    return $ Row hasTblHeader (beforeCells ++ cells)
 elemToRow _ _ = throwError WrongElem
 
 elemToCell :: NameSpaces -> Element -> D Cell
@@ -867,9 +885,15 @@ elemToBodyPart ns element
                        Just l  -> elemToTblLook ns l
                        Nothing -> return defaultTblLook
 
-    grid <- grid'
+    grid'' <- grid'
     tblLook <- tblLook'
     rows <- mapD (elemToRow ns) (elChildren element)
+    let grid = if null grid''
+                  then let numcols = case rowsToRowspans rows of
+                                       (cs@(_:_):_) -> sum (map fst cs)
+                                       _ -> 0
+                       in replicate numcols 0.0
+                  else grid''
     return $ Tbl mbstyle (caption <> description) grid tblLook rows
 elemToBodyPart _ _ = throwError WrongElem
 
@@ -1022,8 +1046,8 @@ elemToParPart' :: NameSpaces -> Element -> D [ParPart]
 elemToParPart' ns element
   | isElem ns "w" "r" element
   , Just drawingElem <- findChildByName ns "w" "drawing" element
-  , pic_ns <- "http://schemas.openxmlformats.org/drawingml/2006/picture"
-  , picElems <- findElements (QName "pic" (Just pic_ns) (Just "pic")) drawingElem
+  , picElems <- filterElementsName
+                 (matchQName "drawingml" "picture" (Just "pic") "pic") drawingElem
   = let (title, alt) = getTitleAndAlt ns drawingElem
         drawings = map (\el ->
                         ((findBlip el >>= findAttrByName ns "r" "embed"), el))
@@ -1057,15 +1081,15 @@ elemToParPart' ns element
 elemToParPart' ns element
   | isElem ns "w" "r" element
   , Just drawingElem <- findChildByName ns "w" "drawing" element
-  , d_ns <- "http://schemas.openxmlformats.org/drawingml/2006/diagram"
-  , Just _ <- findElement (QName "relIds" (Just d_ns) (Just "dgm")) drawingElem
+  , Just _ <- filterElementName
+                 (matchQName "drawingml" "diagram" (Just "dgm") "relIds") drawingElem
   = return [Diagram]
 -- Chart
 elemToParPart' ns element
   | isElem ns "w" "r" element
   , Just drawingElem <- findChildByName ns "w" "drawing" element
-  , c_ns <- "http://schemas.openxmlformats.org/drawingml/2006/chart"
-  , Just _ <- findElement (QName "chart" (Just c_ns) (Just "c")) drawingElem
+  , Just _ <- filterElementName
+                (matchQName "drawingml" "chart" (Just "c") "chart") drawingElem
   = return [Chart]
 elemToParPart' ns element
   | isElem ns "w" "r" element = do
@@ -1146,8 +1170,8 @@ elemToExtent el =
 childElemToRun :: NameSpaces -> Element -> D [Run]
 childElemToRun ns element
   | isElem ns "w" "drawing" element
-  , pic_ns <- "http://schemas.openxmlformats.org/drawingml/2006/picture"
-  , picElems <- findElements (QName "pic" (Just pic_ns) (Just "pic")) element
+  , picElems <- filterElementsName
+                 (matchQName "drawingml" "picture" (Just "pic") "pic") element
   = let (title, alt) = getTitleAndAlt ns element
         drawings = map (\el ->
                          ((findBlip el >>= findAttrByName ns "r" "embed"), el))
@@ -1161,13 +1185,13 @@ childElemToRun ns element
        drawings
 childElemToRun ns element
   | isElem ns "w" "drawing" element
-  , c_ns <- "http://schemas.openxmlformats.org/drawingml/2006/chart"
-  , Just _ <- findElement (QName "chart" (Just c_ns) (Just "c")) element
+  , Just _ <- filterElementName
+                 (matchQName "drawingml" "chart" (Just "c") "chart") element
   = return [InlineChart]
 childElemToRun ns element
   | isElem ns "w" "drawing" element
-  , c_ns <- "http://schemas.openxmlformats.org/drawingml/2006/diagram"
-  , Just _ <- findElement (QName "relIds" (Just c_ns) (Just "dgm")) element
+  , Just _ <- filterElementName
+                 (matchQName "drawingml" "diagram" (Just "dgm") "relIds") element
   = return [InlineDiagram]
 childElemToRun ns element
   | isElem ns "w" "footnoteReference" element
@@ -1188,15 +1212,6 @@ childElemToRun ns element
 childElemToRun _ _ = throwError WrongElem
 
 elemToRun :: NameSpaces -> Element -> D [Run]
-elemToRun ns element
-  | isElem ns "w" "r" element
-  , Just altCont <- findChildByName ns "mc" "AlternateContent" element =
-    do let choices = findChildrenByName ns "mc" "Choice" altCont
-           choiceChildren = concatMap (take 1 . elChildren) choices
-       outputs <- mapD (childElemToRun ns) choiceChildren
-       case outputs of
-         r : _ -> return r
-         []    -> throwError WrongElem
 elemToRun ns element
   | isElem ns "w" "r" element
   , Just drawingElem <- findChildByName ns "w" "drawing" element =
@@ -1358,19 +1373,23 @@ setFont f s = s{envFont = f}
 
 findBlip :: Element -> Maybe Element
 findBlip el = do
-  blip <- findElement (QName "blip" (Just a_ns) (Just "a")) el
+  blip <- filterElementName (matchQName "drawingml" "main" (Just "a") "blip") el
   -- return svg if present:
   filterElementName (\(QName tag _ _) -> tag == "svgBlip") el `mplus` pure blip
- where
-  a_ns = "http://schemas.openxmlformats.org/drawingml/2006/main"
 
+-- | Checks if any style in the style hierarchy is a caption style.
 hasCaptionStyle :: ParagraphStyle -> Bool
-hasCaptionStyle parstyle = any (isCaptionStyleName . pStyleName) (pStyle parstyle)
+hasCaptionStyle =
+  any (isCaptionStyleName . pStyleName) . concatMap nestedStyles . pStyle
  where -- note that these are case insensitive:
    isCaptionStyleName "caption" = True
    isCaptionStyleName "table caption" = True
    isCaptionStyleName "image caption" = True
    isCaptionStyleName _ = False
+
+   -- Gets all the style names in the style hierarchy
+   nestedStyles :: ParStyle -> [ParStyle]
+   nestedStyles ps = ps : maybe [] nestedStyles (psParentStyle ps)
 
 stripCaptionLabel :: [Element] -> [Element]
 stripCaptionLabel els =
@@ -1387,3 +1406,23 @@ stripCaptionLabel els =
        (qName name == "instrText" &&
           let ws = T.words (strContent el)
           in  ("Table" `elem` ws || "Figure" `elem` ws))
+
+isNamespace :: Text -> Text -> Text -> Bool
+isNamespace primary secondary url =
+  -- first try transitional:
+  case T.stripPrefix "http://schemas.openxmlformats.org/" url of
+    Just path -> path == primary <> "/2006/" <> secondary
+    Nothing -> -- then try strict:
+      case T.stripPrefix "http://purl.oclc.org/ooxml/" url of
+        Just path -> path == primary <> "/" <> snakeToCamel secondary
+        Nothing -> False
+ where
+   snakeToCamel "custom-properties" = "customProperties"
+   snakeToCamel "extended-properties" = "extendedProperties"
+   snakeToCamel x = x
+
+matchQName :: Text -> Text -> Maybe Text -> Text -> QName -> Bool
+matchQName primary secondary mbprefix name (QName name' mbns' mbprefix') =
+  name == name' &&
+  (isNothing mbprefix || mbprefix' == mbprefix) &&
+  maybe True (isNamespace primary secondary) mbns'

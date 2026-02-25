@@ -45,10 +45,16 @@ module Text.Pandoc.Writers.Shared (
                      , toLegacyTable
                      , splitSentences
                      , ensureValidXmlIdentifiers
+                     , removeLinks
                      , setupTranslations
                      , isOrderedListMarker
                      , toTaskListItem
                      , delimited
+                     , allRowsEmpty
+                     , tableBodiesToRows
+                     , insertCurrentSpansAtColumn
+                     , takePreviousSpansAtColumn
+                     , decrementTrailingRowSpans
                      )
 where
 import Safe (lastMay, maximumMay)
@@ -57,8 +63,9 @@ import Control.Monad (MonadPlus, mzero)
 import Data.Either (isRight)
 import Data.Aeson (ToJSON (..), encode)
 import Data.Char (chr, ord, isSpace, isLetter, isUpper)
-import Data.List (groupBy, intersperse, foldl', transpose)
-import Data.List.NonEmpty (NonEmpty(..))
+import Data.List (groupBy, intersperse, transpose)
+import qualified Data.List as L
+import Data.List.NonEmpty (NonEmpty((:|)))
 import Data.Text.Conversions (FromText(..))
 import qualified Data.Map as M
 import qualified Data.Text as T
@@ -375,7 +382,7 @@ makeDummy c =
                   cellTopBorder = NoLine }
 
 addDummies :: [[RenderedCell Text]] -> [[RenderedCell Text]]
-addDummies = reverse . foldl' go []
+addDummies = reverse . L.foldl' go []
  where
    go [] cs = [cs]
    go (prevRow:rs) cs = addDummiesToRow prevRow cs : prevRow : rs
@@ -462,7 +469,7 @@ combineBorders t1 t2 =
 
 formatHeaderLine :: Show a => LineStyle -> [[RenderedCell a]] -> Doc Text
 formatHeaderLine lineStyle rows =
-  literal $ foldl'
+  literal $ L.foldl'
     (\t row -> combineBorders t (render Nothing $ formatBorder (const lineStyle) True row))
     mempty rows
 
@@ -473,7 +480,7 @@ formatBorder borderStyle alignMarkers cs =
                             then char '|'
                             else char '+'
  where
-   (lastBorderStyle, borderParts) = foldl' addBorder (NoLine, mempty) cs
+   (lastBorderStyle, borderParts) = L.foldl' addBorder (NoLine, mempty) cs
    addBorder (prevBorderStyle, accum) c =
      (borderStyle c, accum <> char junctionChar <> toBorderSection c)
       where junctionChar = case (borderStyle c, prevBorderStyle) of
@@ -568,6 +575,8 @@ lookupMetaBool key meta =
 
 -- | Retrieve the metadata value for a given @key@
 -- and extract blocks.
+--
+-- Note that an empty list is returned for maps, lists, and booleans.
 lookupMetaBlocks :: Text -> Meta -> [Block]
 lookupMetaBlocks key meta =
   case lookupMeta key meta of
@@ -578,6 +587,8 @@ lookupMetaBlocks key meta =
 
 -- | Retrieve the metadata value for a given @key@
 -- and extract inlines.
+--
+-- Note that an empty list is returned for maps and lists.
 lookupMetaInlines :: Text -> Meta -> [Inline]
 lookupMetaInlines key meta =
   case lookupMeta key meta of
@@ -589,6 +600,8 @@ lookupMetaInlines key meta =
 
 -- | Retrieve the metadata value for a given @key@
 -- and convert to String.
+--
+-- Note that an empty list is returned for maps, lists, and booleans.
 lookupMetaString :: Text -> Meta -> Text
 lookupMetaString key meta =
   case lookupMeta key meta of
@@ -799,6 +812,14 @@ walkAttr f = walk goInline . walk goBlock
   goBlock (Div attr bs) = Div (f attr) bs
   goBlock x = x
 
+-- | Convert links to spans; most useful when writing elements that must not
+-- contain links, e.g. to avoid nested links.
+removeLinks :: [Inline] -> [Inline]
+removeLinks = walk go
+ where
+  go (Link attr ils _) = Span attr ils
+  go x = x
+
 -- | Set translations based on the `lang` in metadata.
 setupTranslations :: PandocMonad m => Meta -> m ()
 setupTranslations meta = do
@@ -842,3 +863,66 @@ delimited opener closer content =
   toList (Concat (Concat a b) c) = toList (Concat a (Concat b c))
   toList (Concat a b) = a : toList b
   toList x = [x]
+
+-- | Determine whether all rows and their cells are empty.
+allRowsEmpty :: [Row] -> Bool
+allRowsEmpty = all isEmptyRow
+ where
+  isEmptyRow (Row _ cells) = all isEmptyCell cells
+  isEmptyCell (Cell _ _ _ _ blocks) = null blocks
+
+-- | Concatenates the header and body Rows of a List of TableBody into a flat
+-- List of Rows.
+tableBodiesToRows :: [TableBody] -> [Row]
+tableBodiesToRows = concatMap tableBodyToRows
+  where
+    tableBodyToRows (TableBody _ _ headerRows bodyRows) = headerRows ++ bodyRows
+
+-- | Insert the current span information of a table cell to keep track of it in
+-- subsequent rows.
+--
+-- If 'RowSpan' @> 1@, the current span information will be inserted. Otherwise
+-- the previous span information will be left unchanged.
+--
+-- Use 'takePreviousSpansAtColumn' to take previous span information at
+-- subsequent rows. Use 'decrementTrailingRowSpans' to handle previous trailing
+-- spans at the end of a row.
+--
+-- For writers that need to manually apply the 'RowSpan' of cells over multiple
+-- rows or otherwise have to keep track of it.
+insertCurrentSpansAtColumn :: Int -> M.Map Int (RowSpan, ColSpan) -> RowSpan -> ColSpan -> M.Map Int (RowSpan, ColSpan)
+insertCurrentSpansAtColumn columnPosition previousSpans (RowSpan rowSpan) colSpan =
+  if (rowSpan > 1)
+    then M.insert columnPosition (RowSpan rowSpan - 1, colSpan) previousSpans -- Minus its own row.
+    else previousSpans
+
+-- | Take previous span information at a column position that was added with
+-- 'insertCurrentSpansAtColumn' if available.
+--
+-- If the previous 'RowSpan' @>= 1@, this will return 'Just' the previous
+-- 'ColSpan' and an adjusted span information where that 'RowSpan' is either
+-- decremented or deleted if it would fall to 0. Otherwise this will return
+-- 'Nothing'.
+takePreviousSpansAtColumn :: Int -> M.Map Int (RowSpan, ColSpan) -> Maybe (ColSpan, M.Map Int (RowSpan, ColSpan))
+takePreviousSpansAtColumn columnPosition previousSpans
+  | Just previous@(RowSpan previousRowSpan, previousColSpan) <- M.lookup columnPosition previousSpans
+  , previousRowSpan >= 1 = Just (previousColSpan, decrementPreviousRowSpans previous)
+  | otherwise = Nothing
+ where
+  decrementPreviousRowSpans (RowSpan previousRowSpan, previousColSpan) =
+    if previousRowSpan > 1
+      then M.insert columnPosition (RowSpan previousRowSpan - 1, previousColSpan) previousSpans
+      else M.delete columnPosition previousSpans
+
+-- | Decrement all previously tracked trailing 'RowSpan' elements at or after a
+-- column position.
+--
+-- For handling previous row spans that are next to the end of a row's cells
+-- that were previously added with 'insertCurrentSpansAtColumn'.
+decrementTrailingRowSpans :: Int -> M.Map Int (RowSpan, ColSpan) -> M.Map Int (RowSpan, ColSpan)
+decrementTrailingRowSpans columnPosition = M.mapWithKey decrementTrailing
+  where
+    decrementTrailing previousColumnPosition previousSpan@(RowSpan rowSpan, colSpan) =
+      if previousColumnPosition >= columnPosition && rowSpan >= 1
+        then (RowSpan rowSpan - 1, colSpan)
+        else previousSpan
