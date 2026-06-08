@@ -438,6 +438,10 @@ blockToOpenXML' opts (Plain lst) = do
      else block
 blockToOpenXML' opts (Para lst)
   | null lst && not (isEnabled Ext_empty_paragraphs opts) = return []
+  | [Math InlineMath _] <- lst
+     = blockToOpenXML' opts (Para (lst ++ [Str "\x200B"])) -- see #11674
+       -- we add a space to prevent Word from displaying the single
+       -- inline math element with display math style
   | otherwise = do
       isFirstPara <- gets stFirstPara
       let displayMathPara = case lst of
@@ -907,6 +911,7 @@ inlineToOpenXML' opts (Code attrs str) = do
 inlineToOpenXML' opts (Note bs) = do
   notes <- gets stFootnotes
   notenum <- getUniqueId
+  oldFirstPara <- gets stFirstPara
   footnoteStyle <- rStyleM "Footnote Reference"
   let notemarker = mknode "w:r" []
                    [ mknode "w:rPr" [] footnoteStyle
@@ -922,6 +927,7 @@ inlineToOpenXML' opts (Note bs) = do
                                 , envInNote = True })
               (withParaPropM (pStyleM "Footnote Text") $
                blocksToOpenXML opts $ insertNoteRef bs)
+  modify $ \s -> s{ stFirstPara = oldFirstPara }
   let newnote = mknode "w:footnote" [("w:id", notenum)] contents
   modify $ \s -> s{ stFootnotes = newnote : notes }
   return [ Elem $ mknode "w:r" []
